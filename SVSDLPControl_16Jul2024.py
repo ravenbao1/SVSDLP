@@ -36,7 +36,7 @@ WTSFreeMemory = wtsapi32.WTSFreeMemory
 WTS_CURRENT_SESSION = WTSGetActiveConsoleSessionId()
 
 # Setup logging
-log_file_path = 'C:\\temp\\PCEng\\SVSDLPControl.log'
+log_file_path = 'C:\\Windows\\SVSDLPControl.log'
 log_dir = os.path.dirname(log_file_path)
 
 # Create the directory if it doesn't exist
@@ -183,8 +183,10 @@ def remove_registry_values_for_all_users_hku(key, value_names):
                                 logger.info(f"Removed registry value for user {sid}: {value_name}")
                             except FileNotFoundError:
                                 logger.warning(f"Registry value {value_name} not found for user {sid}")
+                            except PermissionError:
+                                logger.error(f"Access denied when trying to remove registry value {value_name} for user {sid}")
                 except Exception as e:
-                    logger.error(f"Error removing registry value for user {sid}: {e}")
+                    logger.error(f"Error accessing registry for user {sid}: {e}")
     except Exception as e:
         logger.error(f"Error accessing HKEY_USERS: {e}")
 
