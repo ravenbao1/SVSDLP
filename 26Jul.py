@@ -62,8 +62,8 @@ osk_value_name = "OnScreenKeyboard"
 osk_value_data = "osk.exe"
 screen_clipping_host_value_name = "ScreenClippingHost"
 screen_clipping_host_value_data = "ScreenClippingHost.exe"
-screen_sketch_value_name = "ScreenSketch"
-screen_sketch_value_data = "ScreenSketch.exe"
+screensketch_value_name = "ScreenSketch"
+screensketch_value_data = "ScreenSketch.exe"
 print_screen_key_value_name = "PrintScreenKeyForSnippingEnabled"
 print_screen_key_value_data = 0  # Value data is DWORD 0
 
@@ -100,10 +100,7 @@ other_keywords = [
 ]
 
 # Programs to check
-specific_programs = [
-    "javaw.exe", "javaws.exe", "queuesvr.exe", "sb_twprc.exe",
-    "java.exe", "sp_logon.dll", "screensketch.exe"
-]
+specific_programs = ["javaw.exe", "javaws.exe", "queuesvr.exe", "sb_twprc.exe", "java.exe", "sp_logon.dll"]
 
 # Flag to indicate if the Print Screen key should be blocked
 block_print_screen = False
@@ -213,8 +210,12 @@ def remove_registry_values_for_all_users_hku(key, value_names):
 
 def remove_specific_registry_values():
     value_names_to_remove = [
-        snipping_tool_value_name, steps_recorder_value_name, osk_value_name,
-        screen_clipping_host_value_name, screen_sketch_value_name, "2", "3"
+        snipping_tool_value_name, 
+        steps_recorder_value_name, 
+        osk_value_name, 
+        screen_clipping_host_value_name,
+        screensketch_value_name,
+        "2", "3"
     ]
     remove_registry_values_for_all_users_hku(disallow_run_key_path, value_names_to_remove)
 
@@ -226,11 +227,7 @@ def ensure_print_screen_key_setting():
                 sid = winreg.EnumKey(hku_key, i)
                 try:
                     with winreg.CreateKeyEx(winreg.HKEY_USERS, f"{sid}\\{keyboard_policy_path}", 0, winreg.KEY_ALL_ACCESS) as reg_key:
-                        current_value, _ = winreg.QueryValueEx(reg_key, print_screen_key_value_name)
-                        if current_value != print_screen_key_value_data:
-                            winreg.SetValueEx(reg_key, print_screen_key_value_name, 0, winreg.REG_DWORD, print_screen_key_value_data)
-                except FileNotFoundError:
-                    winreg.SetValueEx(reg_key, print_screen_key_value_name, 0, winreg.REG_DWORD, print_screen_key_value_data)
+                        winreg.SetValueEx(reg_key, print_screen_key_value_name, 0, winreg.REG_DWORD, print_screen_key_value_data)
                 except Exception as e:
                     pass
     except Exception as e:
@@ -252,13 +249,15 @@ def block_apps():
         steps_recorder_value_name: steps_recorder_value_data,
         osk_value_name: osk_value_data,
         screen_clipping_host_value_name: screen_clipping_host_value_data,
-        screen_sketch_value_name: screen_sketch_value_data
+        screensketch_value_name: screensketch_value_data
     }
     set_registry_values_for_all_users_hku(disallow_run_key_path, values_to_set)
     kill_existing_instances([
-        snipping_tool_value_data.lower(), steps_recorder_value_data.lower(),
-        osk_value_data.lower(), screen_clipping_host_value_data.lower(),
-        screen_sketch_value_data.lower()
+        snipping_tool_value_data.lower(), 
+        steps_recorder_value_data.lower(), 
+        osk_value_data.lower(), 
+        screen_clipping_host_value_data.lower(),
+        screensketch_value_data.lower()
     ])
     logger.info("Applications have been blocked and existing instances killed.")
     install_keyboard_hooks()
@@ -268,9 +267,11 @@ def block_apps():
 def unblock_apps():
     global block_print_screen
     value_names_to_remove = [
-        snipping_tool_value_name, steps_recorder_value_name,
-        osk_value_name, screen_clipping_host_value_name,
-        screen_sketch_value_name
+        snipping_tool_value_name, 
+        steps_recorder_value_name, 
+        osk_value_name, 
+        screen_clipping_host_value_name,
+        screensketch_value_name
     ]
     remove_registry_values_for_all_users_hku(disallow_run_key_path, value_names_to_remove)
     logger.info("Applications have been unblocked.")
@@ -284,12 +285,14 @@ def check_and_update_registry(block_required):
         steps_recorder_value_name: steps_recorder_value_data,
         osk_value_name: osk_value_data,
         screen_clipping_host_value_name: screen_clipping_host_value_data,
-        screen_sketch_value_name: screen_sketch_value_data
+        screensketch_value_name: screensketch_value_data
     }
     value_names_to_remove = [
-        snipping_tool_value_name, steps_recorder_value_name,
-        osk_value_name, screen_clipping_host_value_name,
-        screen_sketch_value_name
+        snipping_tool_value_name, 
+        steps_recorder_value_name, 
+        osk_value_name, 
+        screen_clipping_host_value_name,
+        screensketch_value_name
     ]
 
     if block_required:
@@ -336,9 +339,11 @@ def prevent_new_instances():
                     logger.info(f"Blocking triggered by process {detected_by[0]} (PID: {detected_by[1]}) with keyword: {detected_by[2]}")
                 # Continuously kill instances of the controlled apps
                 kill_existing_instances([
-                    snipping_tool_value_data.lower(), steps_recorder_value_data.lower(),
-                    osk_value_data.lower(), screen_clipping_host_value_data.lower(),
-                    screen_sketch_value_data.lower()
+                    snipping_tool_value_data.lower(), 
+                    steps_recorder_value_data.lower(), 
+                    osk_value_data.lower(), 
+                    screen_clipping_host_value_data.lower(),
+                    screensketch_value_data.lower()
                 ])
             else:
                 if block_print_screen:
@@ -358,8 +363,8 @@ def prevent_new_instances():
         except Exception as e:
             logger.error(f"An error occurred: {e}")
 
-        # Check every 4 seconds
-        time.sleep(4)
+        # Check every 5 seconds
+        time.sleep(5)
 
 def main():
     logger.info("Script started.")
