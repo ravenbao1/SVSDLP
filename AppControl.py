@@ -6,10 +6,15 @@ import logging.handlers
 import ctypes
 from ctypes import wintypes
 import gc
+import os
 
 # Define the path to the CSV file and log file
 csv_file_path = r"C:\Program Files\OCBC\OCBCDLP\BlockedApps.csv"
-log_file_path = r"C:\Program Files\OCBC\OCBCDLP\BlockedApps.log"
+log_file_dir = r"C:\temp\PCEng\OCBCDLP"
+log_file_path = os.path.join(log_file_dir, "BlockedApps.log")
+
+# Create the directory if it doesn't exist
+os.makedirs(log_file_dir, exist_ok=True)
 
 # Set up logging with rotation
 log_handler = logging.handlers.RotatingFileHandler(
