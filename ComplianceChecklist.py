@@ -6,7 +6,7 @@ from tkinter import font, filedialog
 import psutil
 import winreg
 from datetime import datetime
-from PIL import ImageGrab
+from PIL import Image, ImageDraw
 import getpass
 import ctypes
 import uuid
@@ -181,6 +181,20 @@ def get_activation_state():
     except Exception as e:
         return f"Error: {str(e)}"
     
+def check_unwanted_software(app_name):
+    try:
+        # Run the PowerShell command to check for the app package
+        command = f"(get-appxpackage {app_name}).PackageFullName"
+        result = subprocess.run(['powershell', '-Command', command], capture_output=True, text=True)
+        
+        # Check if the output is empty
+        if result.stdout.strip():
+            return "Found", "#FF0000"  # Found, use bright red
+        else:
+            return "Not Found", "#00FF00"  # Not Found, use bright green
+    except Exception as e:
+        return f"Error: {str(e)}", "#FF0000"
+    
 def check_os_compliance(os_edition, os_build, os_version):
     # Define baselines
     win11_baseline_build = "22631.3880"
@@ -208,7 +222,15 @@ def get_windows_version():
     return platform.version()
 
 def get_current_user():
-    return getpass.getuser()
+    try:
+        # Run the PowerShell command to get the current logged-on user
+        command = "[System.Security.Principal.WindowsIdentity]::GetCurrent().Name"
+        result = subprocess.check_output(["powershell", "-Command", command], shell=True)
+        # Decode the result and strip any extra whitespace
+        current_user = result.decode().strip()
+        return current_user
+    except subprocess.CalledProcessError as e:
+        return f"Error retrieving user: {str(e)}"
 
 def get_os_install_date():
     try:
@@ -346,11 +368,11 @@ def check_existence(file_path, reg_path=None, expected_displayname=None, expecte
 
 def get_windows_edition():
     try:
-        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows NT\CurrentVersion")
-        product_name, _ = winreg.QueryValueEx(key, "ProductName")
-        
-        # Combine product name and edition with a space in between
-        return f"{product_name}"
+        # Run the PowerShell command to get the OS caption
+        result = subprocess.check_output(["powershell", "-Command", "(Get-WmiObject -Class Win32_OperatingSystem).Caption"], shell=True)
+        # Decode the result and strip any extra whitespace
+        os_version = result.decode().strip()
+        return os_version
     except Exception as e:
         return "Unknown"
 
@@ -613,14 +635,49 @@ def format_item(canvas, x, y, item_name, existence_result, service_result, color
     canvas.create_line(x, y + 20, x + 800, y + 20, fill=color, width=1)
 
 
-def save_as_image(canvas):
-    file_path = filedialog.asksaveasfilename(defaultextension=".png", filetypes=[("PNG files", "*.png"), ("All files", "*.*")])
+def save_as_image(canvas, scale=0.6):
+    # Update the canvas to ensure all content is rendered
+    canvas.update_idletasks()
+    
+    # Get the full canvas size
+    canvas_width = int(canvas.winfo_width() * scale)
+    canvas_height = int(canvas.bbox("all")[3] * scale)  # Scale the height as well
+    
+    # Create a new image with the scaled size
+    img = Image.new("RGB", (canvas_width, canvas_height), "black")
+    draw = ImageDraw.Draw(img)
+    
+    # Draw the text and other elements manually onto the image
+    for item in canvas.find_all():
+        item_type = canvas.type(item)
+        x0, y0, x1, y1 = [int(coord * scale) for coord in canvas.bbox(item)]
+        
+        if item_type == "text":
+            text = canvas.itemcget(item, "text")
+            fill = canvas.itemcget(item, "fill")
+            draw.text((x0, y0), text, fill=fill)  # Draw the text
+        elif item_type == "line":
+            fill = canvas.itemcget(item, "fill")
+            draw.line((x0, y0, x1, y1), fill=fill)
+        elif item_type == "rectangle":
+            fill = canvas.itemcget(item, "outline")
+            draw.rectangle((x0, y0, x1, y1), outline=fill)
+        # Add more types as needed
+    
+    
+    hostname = get_hostname()
+
+    # Get today's date in YYYYMMDD format
+    today_date = datetime.now().strftime("%d%m%Y")
+
+    # Create the default filename with hostname and date
+    default_filename = f"{hostname}_{today_date}.png"
+
+    # Ask the user where to save the image
+    file_path = filedialog.asksaveasfilename(defaultextension=".png", filetypes=[("PNG files", "*.png"), ("All files", "*.*")], initialfile=default_filename)
     if file_path:
-        x = root.winfo_rootx() + canvas.winfo_x()
-        y = root.winfo_rooty() + canvas.winfo_y()
-        x1 = x + canvas.winfo_width()
-        y1 = y + canvas.winfo_height()
-        ImageGrab.grab().crop((x, y, x1, y1)).save(file_path)
+        # Save the image
+        img.save(file_path)
 
 def draw_category(canvas, category_name, items, start_y):
     y = start_y
@@ -668,7 +725,7 @@ def main():
     margin = 20  # Define margin before using it
 
     # Make the window's width unchangeable
-    root.resizable(width=False, height=False)
+    root.resizable(width=False, height=True)
 
     menu_bar = tk.Menu(root)
     file_menu = tk.Menu(menu_bar, tearoff=0)
@@ -756,7 +813,7 @@ def main():
     device_info_items = [
         {"name": "OS Build", "value": os_build, "color": os_build_color},
         {"name": "OS Version", "value": os_version, "color": os_version_color},
-        {"name": "AD OU", "value": ad_ou, "color": ad_ou_color},
+        #{"name": "AD OU", "value": ad_ou, "color": ad_ou_color},
         {"name": "Windows Activation State", "value": activation_state, "color": activation_color},
         {"name": "Compliance Status", "value": compliance_status, "color": compliance_color, "font": bold_font}
     ]
@@ -906,29 +963,33 @@ def main():
         "Unwanted Software": [
             {
                 "name": "New Outlook",
-                "check_function": lambda: check_wildcard_path(r"C:\Program Files\WindowsApps\*OutlookForWindows*"),
+                "check_function": lambda: check_unwanted_software("Microsoft.OutlookForWindows"),
                 "description": "Check if New Outlook is installed (should not be present).",
-                "service_name": None
+                "service_status": "N/A"
             },
             {
                 "name": "XBOX",
-                "check_function": lambda: check_wildcard_path(r"C:\Program Files\WindowsApps\*xboxapp*"),
-                "description": "Check if XBOX is installed (should not be present)."
+                "check_function": lambda: check_unwanted_software("Microsoft.XboxGameCallableUI"),
+                "description": "Check if XBOX is installed (should not be present).",
+                "service_status": "N/A"
             },
             {
                 "name": "Classic Teams",
-                "check_function": lambda: check_wildcard_path(r"C:\Program Files\WindowsApps\MicrosoftTeams*"),
-                "description": "Check if Classic Teams is installed (should not be present)."
+                "check_function": lambda: check_unwanted_software("MicrosoftTeams"),
+                "description": "Check if Classic Teams is installed (should not be present).",
+                "service_status": "N/A"
             },
             {
                 "name": "Solitaire",
-                "check_function": lambda: check_wildcard_path(r"C:\Program Files\WindowsApps\*MicrosoftSolitaireCollection*"),
-                "description": "Check if Solitaire is installed (should not be present)."
+                "check_function": lambda: check_unwanted_software("Microsoft.MicrosoftSolitaireCollection"),
+                "description": "Check if Solitaire is installed (should not be present).",
+                "service_status": "N/A"
             },
             {
                 "name": "Movie & TV",
-                "check_function": lambda: check_wildcard_path(r"C:\Program Files\WindowsApps\*ZuneVideo*"),
-                "description": "Check if Movie & TV is installed (should not be present)."
+                "check_function": lambda: check_unwanted_software("Microsoft.ZuneVideo"),
+                "description": "Check if Movie & TV is installed (should not be present).",
+                "service_status": "N/A"
             },
             {
                 "name": "Skype for Business",
