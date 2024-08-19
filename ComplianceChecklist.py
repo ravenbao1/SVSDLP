@@ -222,15 +222,30 @@ def get_windows_version():
     return platform.version()
 
 def get_current_user():
-    try:
-        # Run the PowerShell command to get the current logged-on user
-        command = "[System.Security.Principal.WindowsIdentity]::GetCurrent().Name"
-        result = subprocess.check_output(["powershell", "-Command", command], shell=True)
-        # Decode the result and strip any extra whitespace
-        current_user = result.decode().strip()
-        return current_user
-    except subprocess.CalledProcessError as e:
-        return f"Error retrieving user: {str(e)}"
+    users_folder = r"C:\Users"
+    latest_time = None
+    last_logged_on_user = None
+
+    # Iterate through all directories in C:\Users
+    for user_folder in os.listdir(users_folder):
+        user_folder_path = os.path.join(users_folder, user_folder)
+        
+        # Ensure it's a directory and not a symbolic link
+        if os.path.isdir(user_folder_path) and not os.path.islink(user_folder_path):
+            # Get the last modification time of the user folder
+            modification_time = os.path.getmtime(user_folder_path)
+            modification_time = datetime.fromtimestamp(modification_time)
+
+            # Check if this is the most recent modification
+            if latest_time is None or modification_time > latest_time:
+                latest_time = modification_time
+                last_logged_on_user = user_folder
+
+    if last_logged_on_user:
+        return last_logged_on_user
+    else:
+        return "No users found"
+
 
 def get_os_install_date():
     try:
@@ -698,11 +713,11 @@ def check_bitlocker():
 
 def check_trellix_disk_encryption():
     try:
-        key_path = r"SOFTWARE\McAfee\Endpoint Encryption Agent"
+        key_path = r"SOFTWARE\McAfee Endpoint Encryption\Endpoint Encryption for PC\Integration\MNE"
         key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path)
-        version, _ = winreg.QueryValueEx(key, "Version")
-        encryption_state, _ = winreg.QueryValueEx(key, "EncryptionState")
-        if version:
+        enabled, _ = winreg.QueryValueEx(key, "Enabled")
+        encryption_state, _ = winreg.QueryValueEx(key, "Enabled")
+        if enabled:
             if encryption_state == 1:  # Assuming 1 means enabled
                 return "Found/Enabled", "#00FF00"
             else:
