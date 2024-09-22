@@ -257,7 +257,8 @@ def main():
                     if now < countdown_end:
                         logging.debug("It's still before the end of the current countdown period. No reboot required yet.")
                     else:
-                        logging.info("The device should now be rebooted, but no actual reboot will be performed as per the updated logic.")
+                        subprocess.run(["cmd", "/c", "shutdown /r /f /t 0"], check=True)
+                        logging.info("The device is bring rebooted.")
                         break
 
         # Adjust sleep time
