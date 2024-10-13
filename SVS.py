@@ -74,21 +74,25 @@ browser_keywords = {
         "ocbc retrieval",
         "ocbc po",
         "SignPlus for OCBC Malaysia",
+        "Digital Board Resolution",
     ],
     "chrome.exe": [
         "SignPlus for OCBC Bank",
         "ocbc retrieval",
         "ocbc po",
-        "SignPlus for OCBC Malaysia"
+        "SignPlus for OCBC Malaysia",
+        "Digital Board Resolution",
     ],
     "iexplore.exe": [
         "SignPlus for OCBC Bank",
         "ocbc retrieval",
         "ocbc po",
         "SignPlus for OCBC Malaysia",
+        "Digital Board Resolution",
     ]
 }
 other_keywords = [
+    "SignPlus for OCBC Bank",
     "edit account",
     "new account",
     "signplus41_signcheck",
