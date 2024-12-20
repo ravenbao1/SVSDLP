@@ -27,6 +27,12 @@ class DeviceInventoryApp:
         self.session = requests.Session()
         self.session.proxies.update(self.PROXIES)
 
+        # Attempt to test the proxy
+        if not self.test_proxy():
+            # If proxy is not reachable, use direct traffic
+            self.PROXIES = None
+            self.session.proxies.clear()
+
         # Intune Graph API credentials
         self.client_id = '2ca3083d-78b8-4fe5-a509-f0ea09d2f7da'
         self.client_secret = 'F0-8Q~vY.lPo.4cXpAIQ-xzlV4wDRBbQsIvmbctE'
@@ -35,16 +41,30 @@ class DeviceInventoryApp:
         self.scope = ["User.Read"]
 
         # Initialize SQLite database and GUI components after authentication
-        self.initialize_main_application()        
+        self.authenticate_user()        
 
         # Bind the configure event to track window state changes
         self.root.bind("<Configure>", self.on_window_configure)
+
+    def test_proxy(self):
+        """Test if the proxy is reachable."""
+        try:
+            # Use a lightweight request to test the proxy
+            test_url = "https://www.google.com"
+            response = self.session.get(test_url, verify=False, proxies=self.PROXIES, timeout=5)
+            if response.status_code == 200:
+                print("Proxy server is reachable.")
+                return True
+        except requests.exceptions.RequestException as e:
+            print(f"Proxy test failed: {e}. Falling back to direct traffic.")
+        return False
 
     def authenticate_user(self):
         # Create an MSAL public client application
         app = msal.PublicClientApplication(
             client_id=self.client_id,
             authority=self.authority,
+            proxies=self.PROXIES
         )
 
         # Queue to communicate between the thread and the main function
@@ -77,7 +97,7 @@ class DeviceInventoryApp:
         else:
             # Get the result from the queue
             try:
-                token = app.acquire_token_interactive(scopes=self.scope)
+                token = result_queue.get_nowait()
                 if isinstance(token, Exception):
                     # If an exception occurred in the thread
                     messagebox.showerror("Authentication Error", f"An error occurred: {str(token)}")
@@ -621,7 +641,7 @@ class DeviceInventoryApp:
             'scope': 'https://graph.microsoft.com/.default'
         }
         try:
-            response = self.session.post(url, headers=headers, data=body, proxies=self.PROXIES)
+            response = self.session.post(url, headers=headers, data=body, verify=False, proxies=self.PROXIES)
             response.raise_for_status()
             return response.json().get('access_token')
         except requests.exceptions.ProxyError:
@@ -636,7 +656,7 @@ class DeviceInventoryApp:
             'Authorization': f'Bearer {access_token}',
             'Content-Type': 'application/json'
         }
-        response = requests.get(url, headers=headers, proxies=self.PROXIES)
+        response = requests.get(url, headers=headers, verify=False, proxies=self.PROXIES)
         if response.status_code == 200:
             devices = response.json().get('value', [])
             # Retrieve user details for each device
@@ -661,7 +681,7 @@ class DeviceInventoryApp:
 
         try:
             # Request entra device details
-            entra_info_response = requests.get(entra_info_url, headers=headers, proxies=self.PROXIES)
+            entra_info_response = requests.get(entra_info_url, headers=headers, verify=False, proxies=self.PROXIES)
             if entra_info_response.status_code == 200:
                 device_list = entra_info_response.json().get('value', [])  # Extract 'value' as a list
                 if device_list:  # Ensure the list is not empty
@@ -689,7 +709,7 @@ class DeviceInventoryApp:
 
         try:
             # Request user details (excluding the manager field initially)
-            user_info_response = requests.get(user_info_url, headers=headers, proxies=self.PROXIES)
+            user_info_response = requests.get(user_info_url, headers=headers, verify=False, proxies=self.PROXIES)
             if user_info_response.status_code == 200:
                 user_details = user_info_response.json()
 
@@ -702,7 +722,7 @@ class DeviceInventoryApp:
 
                 # Now make a request to get the manager details using the manager endpoint
                 manager_url = f"https://graph.microsoft.com/v1.0/users/{user_principal_name}/manager"
-                manager_response = requests.get(manager_url, headers=headers, proxies=self.PROXIES)
+                manager_response = requests.get(manager_url, headers=headers, verify=False, proxies=self.PROXIES)
                 manager_display_name = ''
                 if manager_response.status_code == 200:
                     manager_info = manager_response.json()
@@ -830,7 +850,7 @@ class DeviceInventoryApp:
                         'Content-Type': 'application/json'
                     }
                     url = 'https://graph.microsoft.com/v1.0/informationProtection/bitlocker/recoveryKeys'
-                    response = requests.get(url, headers=headers, proxies=self.PROXIES)
+                    response = requests.get(url, headers=headers, verify=False, proxies=self.PROXIES)
 
                     if response.status_code == 200:
                         recovery_keys = response.json().get('value', [])
@@ -847,7 +867,7 @@ class DeviceInventoryApp:
                         if bitlocker_key_id:
                             # Retrieve the actual recovery key using the BitLocker Key ID
                             key_url = f'https://graph.microsoft.com/v1.0/informationProtection/bitlocker/recoveryKeys/{bitlocker_key_id}?$select=key'
-                            key_response = requests.get(key_url, headers=headers, proxies=self.PROXIES)
+                            key_response = requests.get(key_url, headers=headers, verify=False, proxies=self.PROXIES)
 
                             if key_response.status_code == 200:
                                 key_data = key_response.json()
