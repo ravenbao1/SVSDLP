@@ -18,6 +18,15 @@ class DeviceInventoryApp:
         self.root = root
         self.root.title("Device Inventory Viewer")            
 
+        # Proxy configuration
+        self.PROXY_URL = "http://gosurf.ocbc.local:8080"  # Replace with your proxy URL
+        self.PROXIES = {
+            "http": self.PROXY_URL,
+            "https": self.PROXY_URL,
+        }
+        self.session = requests.Session()
+        self.session.proxies.update(self.PROXIES)
+
         # Intune Graph API credentials
         self.client_id = '2ca3083d-78b8-4fe5-a509-f0ea09d2f7da'
         self.client_secret = 'F0-8Q~vY.lPo.4cXpAIQ-xzlV4wDRBbQsIvmbctE'
@@ -26,7 +35,7 @@ class DeviceInventoryApp:
         self.scope = ["User.Read"]
 
         # Initialize SQLite database and GUI components after authentication
-        self.initialize_main_application()     
+        self.initialize_main_application()        
 
         # Bind the configure event to track window state changes
         self.root.bind("<Configure>", self.on_window_configure)
@@ -68,7 +77,7 @@ class DeviceInventoryApp:
         else:
             # Get the result from the queue
             try:
-                token = result_queue.get_nowait()
+                token = app.acquire_token_interactive(scopes=self.scope)
                 if isinstance(token, Exception):
                     # If an exception occurred in the thread
                     messagebox.showerror("Authentication Error", f"An error occurred: {str(token)}")
@@ -611,11 +620,14 @@ class DeviceInventoryApp:
             'client_secret': self.client_secret,
             'scope': 'https://graph.microsoft.com/.default'
         }
-        response = requests.post(url, headers=headers, data=body)
-        if response.status_code == 200:
+        try:
+            response = self.session.post(url, headers=headers, data=body, proxies=self.PROXIES)
+            response.raise_for_status()
             return response.json().get('access_token')
-        else:
-            raise Exception(f"Failed to acquire access token. Status code: {response.status_code}, Response: {response.text}")
+        except requests.exceptions.ProxyError:
+            raise Exception("Proxy error occurred. Please check your proxy settings.")
+        except requests.exceptions.RequestException as e:
+            raise Exception(f"Failed to acquire access token: {e}")
 
     def retrieve_intune_devices(self, access_token):
         url = "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices"
@@ -624,7 +636,7 @@ class DeviceInventoryApp:
             'Authorization': f'Bearer {access_token}',
             'Content-Type': 'application/json'
         }
-        response = requests.get(url, headers=headers)
+        response = requests.get(url, headers=headers, proxies=self.PROXIES)
         if response.status_code == 200:
             devices = response.json().get('value', [])
             # Retrieve user details for each device
@@ -649,7 +661,7 @@ class DeviceInventoryApp:
 
         try:
             # Request entra device details
-            entra_info_response = requests.get(entra_info_url, headers=headers)
+            entra_info_response = requests.get(entra_info_url, headers=headers, proxies=self.PROXIES)
             if entra_info_response.status_code == 200:
                 device_list = entra_info_response.json().get('value', [])  # Extract 'value' as a list
                 if device_list:  # Ensure the list is not empty
@@ -677,7 +689,7 @@ class DeviceInventoryApp:
 
         try:
             # Request user details (excluding the manager field initially)
-            user_info_response = requests.get(user_info_url, headers=headers)
+            user_info_response = requests.get(user_info_url, headers=headers, proxies=self.PROXIES)
             if user_info_response.status_code == 200:
                 user_details = user_info_response.json()
 
@@ -690,7 +702,7 @@ class DeviceInventoryApp:
 
                 # Now make a request to get the manager details using the manager endpoint
                 manager_url = f"https://graph.microsoft.com/v1.0/users/{user_principal_name}/manager"
-                manager_response = requests.get(manager_url, headers=headers)
+                manager_response = requests.get(manager_url, headers=headers, proxies=self.PROXIES)
                 manager_display_name = ''
                 if manager_response.status_code == 200:
                     manager_info = manager_response.json()
@@ -818,7 +830,7 @@ class DeviceInventoryApp:
                         'Content-Type': 'application/json'
                     }
                     url = 'https://graph.microsoft.com/v1.0/informationProtection/bitlocker/recoveryKeys'
-                    response = requests.get(url, headers=headers)
+                    response = requests.get(url, headers=headers, proxies=self.PROXIES)
 
                     if response.status_code == 200:
                         recovery_keys = response.json().get('value', [])
@@ -835,7 +847,7 @@ class DeviceInventoryApp:
                         if bitlocker_key_id:
                             # Retrieve the actual recovery key using the BitLocker Key ID
                             key_url = f'https://graph.microsoft.com/v1.0/informationProtection/bitlocker/recoveryKeys/{bitlocker_key_id}?$select=key'
-                            key_response = requests.get(key_url, headers=headers)
+                            key_response = requests.get(key_url, headers=headers, proxies=self.PROXIES)
 
                             if key_response.status_code == 200:
                                 key_data = key_response.json()
