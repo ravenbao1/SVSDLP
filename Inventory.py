@@ -27,6 +27,12 @@ class DeviceInventoryApp:
         self.session = requests.Session()
         self.session.proxies.update(self.PROXIES)
 
+        # Attempt to test the proxy
+        if not self.test_proxy():
+            # If proxy is not reachable, use direct traffic
+            self.PROXIES = None
+            self.session.proxies.clear()
+
         # Intune Graph API credentials
         self.client_id = '2ca3083d-78b8-4fe5-a509-f0ea09d2f7da'
         self.client_secret = 'F0-8Q~vY.lPo.4cXpAIQ-xzlV4wDRBbQsIvmbctE'
@@ -40,11 +46,25 @@ class DeviceInventoryApp:
         # Bind the configure event to track window state changes
         self.root.bind("<Configure>", self.on_window_configure)
 
+    def test_proxy(self):
+        """Test if the proxy is reachable."""
+        try:
+            # Use a lightweight request to test the proxy
+            test_url = "https://www.google.com"
+            response = self.session.get(test_url, proxies=self.PROXIES, timeout=5)
+            if response.status_code == 200:
+                print("Proxy server is reachable.")
+                return True
+        except requests.exceptions.RequestException as e:
+            print(f"Proxy test failed: {e}. Falling back to direct traffic.")
+        return False
+
     def authenticate_user(self):
         # Create an MSAL public client application
         app = msal.PublicClientApplication(
             client_id=self.client_id,
             authority=self.authority,
+            proxies=self.PROXIES
         )
 
         # Queue to communicate between the thread and the main function
