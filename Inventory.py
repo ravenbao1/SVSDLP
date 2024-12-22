@@ -128,14 +128,7 @@ class DeviceInventoryApp:
         self.root.minsize(width=400, height=600)
         self.root.geometry(f"400x600")
         
-    def authenticate_and_check_access(self):
-        """
-        Authenticate the user using MSAL and check their group membership.
-
-        Returns:
-            tuple: (UPN, role) if authentication and group validation are successful.
-                (None, None) if authentication fails or user is unauthorized.
-        """
+    """ def authenticate_and_check_access(self):
         try:
             # Configuration for MSAL and Microsoft Graph
             client_id = self.client_id  # Replace with your app's client ID
@@ -182,13 +175,22 @@ class DeviceInventoryApp:
 
         except Exception as e:
             print(f"Error during authentication or access check: {e}")
-            return None, None
+            return None, None """
+        
+    def selection_window(self):       
+        self.selection_frame = tk.Frame(self.root, padx=20, pady=20, bg="#3E4C59")
+        self.selection_frame.pack(expand=True, fill='both', padx=10, pady=10)
 
-    def selection_window(self):
-        """
-        Create the inventory selection window after validating user access.
-        """
-        # Authenticate the user and check access
+        self.selection_label = tk.Label(self.selection_frame, text="Select Inventory Type", font=("Arial", 14, "bold"), fg="#E4E7EB", bg="#3E4C59")
+        self.selection_label.pack(pady=10)
+
+        self.hardware_button = tk.Button(self.selection_frame, text="Hardware Inventory", command=self.start_hardware_inventory, font=("Arial", 12), bg="#4A5568", fg="#E4E7EB", activebackground="#6B7280")
+        self.hardware_button.pack(pady=10, fill='x')
+
+        self.software_button = tk.Button(self.selection_frame, text="Software Inventory", command=self.start_software_inventory, font=("Arial", 12), bg="#4A5568", fg="#E4E7EB", activebackground="#6B7280")
+        self.software_button.pack(pady=10, fill='x')
+
+    """ def selection_window(self):
         upn, role = self.authenticate_and_check_access()
         if not upn or not role:
             # Show error screen if the user is unauthorized
@@ -253,12 +255,9 @@ class DeviceInventoryApp:
             fg="#E4E7EB",
             activebackground="#6B7280"
         )
-        self.software_button.pack(pady=10, fill='x')
+        self.software_button.pack(pady=10, fill='x') """
 
-    def show_error_screen(self, title, message):
-        """
-        Display an error screen if the user is not authorized or an error occurs.
-        """
+    """ def show_error_screen(self, title, message):
         error_frame = tk.Frame(self.root, padx=20, pady=20, bg="#3E4C59")
         error_frame.pack(expand=True, fill='both', padx=10, pady=10)
 
@@ -269,7 +268,7 @@ class DeviceInventoryApp:
         message_label.pack(pady=10)
 
         quit_button = tk.Button(error_frame, text="Quit", command=self.root.quit, font=("Arial", 12), bg="#4A5568", fg="#E4E7EB", activebackground="#6B7280")
-        quit_button.pack(pady=20)
+        quit_button.pack(pady=20) """
 
     def start_hardware_inventory(self):
         # Create a new window for the progress bar
