@@ -2,16 +2,16 @@ import pandas as pd
 import tkinter as tk
 from tkinter import messagebox, filedialog
 from tkinter import ttk
-import re
 import sqlite3
 import threading
 import time
 import numpy as np
 import traceback
 import requests
-import msal
-import queue
-import os
+import urllib3
+from msal import PublicClientApplication
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 class DeviceInventoryApp:
     def __init__(self, root):
@@ -41,7 +41,7 @@ class DeviceInventoryApp:
         self.scope = ["User.Read"]
 
         # Initialize SQLite database and GUI components after authentication
-        self.authenticate_user()        
+        self.initialize_main_application()        
 
         # Bind the configure event to track window state changes
         self.root.bind("<Configure>", self.on_window_configure)
@@ -58,76 +58,6 @@ class DeviceInventoryApp:
         except requests.exceptions.RequestException as e:
             print(f"Proxy test failed: {e}. Falling back to direct traffic.")
         return False
-
-    def authenticate_user(self):
-        # Create an MSAL public client application
-        app = msal.PublicClientApplication(
-            client_id=self.client_id,
-            authority=self.authority,
-            proxies=self.PROXIES
-        )
-
-        # Queue to communicate between the thread and the main function
-        result_queue = queue.Queue()
-
-        # Function to acquire token interactively in a separate thread
-        def acquire_token():
-            try:
-                token = app.acquire_token_interactive(
-                    scopes=self.scope,
-                    prompt="login"
-                )
-                result_queue.put(token)
-            except Exception as e:
-                result_queue.put(e)
-
-        # Start the authentication in a separate thread
-        auth_thread = threading.Thread(target=acquire_token)
-        auth_thread.start()
-
-        # Set a timeout for the authentication (e.g., 30 seconds)
-        timeout = 30
-        auth_thread.join(timeout)
-
-        if auth_thread.is_alive():
-            # If the thread is still running after the timeout, handle it as a failure
-            messagebox.showerror("Authentication Error", "Authentication took too long. Please try again.")
-            self.root.quit()  # Properly quit the tkinter mainloop
-            os._exit(1) # Ensure the program is terminated
-        else:
-            # Get the result from the queue
-            try:
-                token = result_queue.get_nowait()
-                if isinstance(token, Exception):
-                    # If an exception occurred in the thread
-                    messagebox.showerror("Authentication Error", f"An error occurred: {str(token)}")
-                    self.root.quit()
-                    os._exit(1)
-                elif token is None:
-                    messagebox.showerror("Authentication Error", "Authentication failed: No response received.")
-                    self.root.quit()
-                    os._exit(1)
-                elif "access_token" in token:
-                    # Successful authentication, initialize the rest of the application
-                    self.token = token["access_token"]
-                    self.initialize_main_application()
-                elif "error" in token:
-                    # Authentication failed with a specific error
-                    error_description = token.get("error_description", "Unknown error")
-                    error_code = token.get("error", "Unknown error code")
-                    messagebox.showerror("Authentication Error", f"Authentication failed: {error_description} (Error Code: {error_code})")
-                    self.root.quit()
-                    os._exit(1)
-                else:
-                    # Authentication failed without a specific error message
-                    messagebox.showerror("Authentication Error", "Authentication failed. Please try again.")
-                    self.root.quit()
-                    os._exit(1)
-            except queue.Empty:
-                # If the queue is empty, something went wrong
-                messagebox.showerror("Authentication Error", "Authentication failed: No response received.")
-                self.root.quit()
-                os._exit(1)
 
     def initialize_main_application(self):
         # Initialize SQLite database
@@ -160,7 +90,7 @@ class DeviceInventoryApp:
                                 ReportTime TEXT,
                                 Source TEXT,
                                 Encryption TEXT,
-                                DisplayName TEXT,
+                                UserDisplayName TEXT,
                                 JobTitle TEXT,
                                 Department TEXT,
                                 EmployeeID TEXT,
@@ -171,6 +101,7 @@ class DeviceInventoryApp:
                                 TrustType TEXT,
                                 TotalStorage TEXT,
                                 FreeStorage TEXT,
+                                PhysicalMemory TEXT,
                                 PRIMARY KEY (SerialNumber, DeviceName)
                               )''')
 
@@ -196,19 +127,149 @@ class DeviceInventoryApp:
     def set_window_size(self):
         self.root.minsize(width=400, height=600)
         self.root.geometry(f"400x600")
+        
+    def authenticate_and_check_access(self):
+        """
+        Authenticate the user using MSAL and check their group membership.
 
-    def selection_window(self):       
+        Returns:
+            tuple: (UPN, role) if authentication and group validation are successful.
+                (None, None) if authentication fails or user is unauthorized.
+        """
+        try:
+            # Configuration for MSAL and Microsoft Graph
+            client_id = self.client_id  # Replace with your app's client ID
+            tenant_id = self.tenant_id  # Replace with your tenant ID
+            authority = f"https://login.microsoftonline.com/{tenant_id}"
+            scopes = ["User.Read", "GroupMember.Read.All"]  # Combine necessary scopes
+
+            # Initialize the MSAL application
+            app = PublicClientApplication(client_id, authority=authority)
+
+            # Check the cache for an existing token
+            accounts = app.get_accounts()
+            if accounts:
+                token_result = app.acquire_token_silent(scopes, account=accounts[0])
+            else:
+                # Prompt for login if no token is available
+                token_result = app.acquire_token_interactive(scopes=scopes)
+
+            # Retrieve the access token and user details
+            access_token = token_result.get("access_token")
+            if not access_token:
+                raise Exception("Failed to acquire access token.")
+
+            upn = token_result["id_token_claims"]["preferred_username"]
+            print(f"Authenticated user: {upn}")
+
+            # Query Microsoft Graph for group memberships
+            headers = {"Authorization": f"Bearer {access_token}"}
+            graph_url = f"https://graph.microsoft.com/v1.0/users/{upn}/memberOf"
+            response = requests.get(graph_url, headers=headers)
+            response.raise_for_status()
+
+            # Check if the user belongs to any required groups
+            required_groups = ["InventorySystemUser", "InventorySystemAdmin", "InventorySystemSuperAdmin"]
+            groups = response.json().get("value", [])
+            for group in groups:
+                if group.get("displayName") in required_groups:
+                    role = group.get("displayName")
+                    print(f"User {upn} is authorized with role: {role}")
+                    return upn, role  # Return UPN and role if authorized
+
+            print(f"User {upn} is not authorized.")
+            return None, None  # User not in required groups
+
+        except Exception as e:
+            print(f"Error during authentication or access check: {e}")
+            return None, None
+
+    def selection_window(self):
+        """
+        Create the inventory selection window after validating user access.
+        """
+        # Authenticate the user and check access
+        upn, role = self.authenticate_and_check_access()
+        if not upn or not role:
+            # Show error screen if the user is unauthorized
+            self.show_error_screen(
+                "Unauthorized Access",
+                "You do not have the required permissions to access the Inventory System."
+            )
+            return
+
+        # Create the selection frame
         self.selection_frame = tk.Frame(self.root, padx=20, pady=20, bg="#3E4C59")
         self.selection_frame.pack(expand=True, fill='both', padx=10, pady=10)
 
-        self.selection_label = tk.Label(self.selection_frame, text="Select Inventory Type", font=("Arial", 14, "bold"), fg="#E4E7EB", bg="#3E4C59")
+        # Display the signed-in user's UPN and role
+        user_label = tk.Label(
+            self.selection_frame,
+            text=f"User: {upn}",
+            font=("Arial", 10, "bold"),
+            fg="#E4E7EB",
+            bg="#3E4C59"
+        )
+        user_label.pack(pady=5)
+
+        role_label = tk.Label(
+            self.selection_frame,
+            text=f"Role: {role}",
+            font=("Arial", 10, "bold"),
+            fg="#E4E7EB",
+            bg="#3E4C59"
+        )
+        role_label.pack(pady=5)
+
+        # Selection label
+        self.selection_label = tk.Label(
+            self.selection_frame,
+            text="Select Inventory Type",
+            font=("Arial", 14, "bold"),
+            fg="#E4E7EB",
+            bg="#3E4C59"
+        )
         self.selection_label.pack(pady=10)
 
-        self.hardware_button = tk.Button(self.selection_frame, text="Hardware Inventory", command=self.start_hardware_inventory, font=("Arial", 12), bg="#4A5568", fg="#E4E7EB", activebackground="#6B7280")
+        # Hardware inventory button
+        self.hardware_button = tk.Button(
+            self.selection_frame,
+            text="Hardware Inventory",
+            command=self.start_hardware_inventory,
+            font=("Arial", 12),
+            bg="#4A5568",
+            fg="#E4E7EB",
+            activebackground="#6B7280"
+        )
         self.hardware_button.pack(pady=10, fill='x')
 
-        self.software_button = tk.Button(self.selection_frame, text="Software Inventory", command=self.start_software_inventory, font=("Arial", 12), bg="#4A5568", fg="#E4E7EB", activebackground="#6B7280")
+        # Software inventory button
+        self.software_button = tk.Button(
+            self.selection_frame,
+            text="Software Inventory",
+            command=self.start_software_inventory,
+            font=("Arial", 12),
+            bg="#4A5568",
+            fg="#E4E7EB",
+            activebackground="#6B7280"
+        )
         self.software_button.pack(pady=10, fill='x')
+
+    def show_error_screen(self, title, message):
+        """
+        Display an error screen if the user is not authorized or an error occurs.
+        """
+        error_frame = tk.Frame(self.root, padx=20, pady=20, bg="#3E4C59")
+        error_frame.pack(expand=True, fill='both', padx=10, pady=10)
+
+        error_label = tk.Label(error_frame, text=title, font=("Arial", 16, "bold"), fg="#FF0000", bg="#3E4C59")
+        error_label.pack(pady=10)
+
+        message_label = tk.Label(error_frame, text=message, font=("Arial", 12), fg="#E4E7EB", bg="#3E4C59", wraplength=400, justify="center")
+        message_label.pack(pady=10)
+
+        quit_button = tk.Button(error_frame, text="Quit", command=self.root.quit, font=("Arial", 12), bg="#4A5568", fg="#E4E7EB", activebackground="#6B7280")
+        quit_button.pack(pady=20)
 
     def start_hardware_inventory(self):
         # Create a new window for the progress bar
@@ -468,24 +529,24 @@ class DeviceInventoryApp:
                         cursor.execute('''UPDATE Devices SET 
                                         User = ?, OperatingSystem = ?, DeviceID = ?, OSVersion = ?, ComplianceState = ?, Source = ?,
                                         Model = ?, Manufacturer = ?, MAC = ?, IntuneLastSync = ?, ReportTime = ?, Encryption = ?,
-                                        DisplayName = ?, JobTitle = ?, Department = ?, EmployeeID = ?, City = ?, Country = ?, Manager = ?,
-                                        EntraLastSync = ?, TrustType = ?, TotalStorage = ?, FreeStorage = ?
+                                        UserDisplayName = ?, JobTitle = ?, Department = ?, EmployeeID = ?, City = ?, Country = ?, Manager = ?,
+                                        EntraLastSync = ?, TrustType = ?, TotalStorage = ?, FreeStorage = ?, PhysicalMemory = ?
                                         WHERE DeviceName = ? AND SerialNumber = ?''',
                                     (row['User'], row['OperatingSystem'], row['DeviceID'], row['OSVersion'], row['ComplianceState'], source_value,
                                     row['Model'], row['Manufacturer'], row['MAC'], row['IntuneLastSync'], report_time_str, row['Encryption'],
-                                    row['DisplayName'], row['JobTitle'], row['Department'], row['EmployeeID'], row['City'], row['Country'], row['Manager'],
-                                    row['EntraLastSync'], row['TrustType'], row['TotalStorage'], row['FreeStorage'],
+                                    row['UserDisplayName'], row['JobTitle'], row['Department'], row['EmployeeID'], row['City'], row['Country'], row['Manager'],
+                                    row['EntraLastSync'], row['TrustType'], row['TotalStorage'], row['FreeStorage'], row['PhysicalMemory'],
                                     row['DeviceName'], row['SerialNumber']))
                     else:
                         # Insert a new record
                         cursor.execute('''INSERT INTO Devices (DeviceName, SerialNumber, User, DeviceID, OperatingSystem, OSVersion, Source, ComplianceState, 
-                                       Model, Manufacturer, MAC, IntuneLastSync, ReportTime, Encryption, DisplayName, JobTitle, Department, EmployeeID, City, Country, Manager,
-                                       EntraLastSync, TrustType, TotalStorage, FreeStorage)
-                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                                       Model, Manufacturer, MAC, IntuneLastSync, ReportTime, Encryption, UserDisplayName, JobTitle, Department, EmployeeID, City, Country, Manager,
+                                       EntraLastSync, TrustType, TotalStorage, FreeStorage, PhysicalMemory)
+                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                                     (row['DeviceName'], row['SerialNumber'], row['User'], row['DeviceID'], row['OperatingSystem'], row['OSVersion'], 'Cloud',
                                     row['ComplianceState'], row['Model'], row['Manufacturer'], row['MAC'], row['IntuneLastSync'], report_time_str, row['Encryption'],
-                                    row['DisplayName'], row['JobTitle'], row['Department'], row['EmployeeID'], row['City'], row['Country'], row['Manager'],
-                                    row['EntraLastSync'], row['TrustType'], row['TotalStorage'], row['FreeStorage']))
+                                    row['UserDisplayName'], row['JobTitle'], row['Department'], row['EmployeeID'], row['City'], row['Country'], row['Manager'],
+                                    row['EntraLastSync'], row['TrustType'], row['TotalStorage'], row['FreeStorage'], row['PhysicalMemory']))
 
                 conn.commit()
 
@@ -602,24 +663,24 @@ class DeviceInventoryApp:
                         cursor.execute('''UPDATE Devices SET 
                                         User = ?, OperatingSystem = ?, DeviceID = ?, OSVersion = ?, ComplianceState = ?, Source = ?,
                                         Model = ?, Manufacturer = ?, MAC = ?, IntuneLastSync = ?, ReportTime = ?, Encryption = ?,
-                                        DisplayName = ?, JobTitle = ?, Department = ?, EmployeeID = ?, City = ?, Country = ?, Manager = ?,
-                                        EntraLastSync = ?, TrustType = ?, TotalStorage = ?, FreeStorage = ?
+                                        UserDisplayName = ?, JobTitle = ?, Department = ?, EmployeeID = ?, City = ?, Country = ?, Manager = ?,
+                                        EntraLastSync = ?, TrustType = ?, TotalStorage = ?, FreeStorage = ?, PhysicalMemory = ?
                                         WHERE DeviceName = ? AND SerialNumber = ?''',
                                     (row['User'], row['OperatingSystem'], row['DeviceID'], row['OSVersion'], row['ComplianceState'], source_value,
                                     row['Model'], row['Manufacturer'], row['MAC'], row['IntuneLastSync'], report_time_str, row['Encryption'],
-                                    row['DisplayName'], row['JobTitle'], row['Department'], row['EmployeeID'], row['City'], row['Country'], row['Manager'],
-                                    row['EntraLastSync'], row['TrustType'], row['TotalStorage'], row['FreeStorage'],
+                                    row['UserDisplayName'], row['JobTitle'], row['Department'], row['EmployeeID'], row['City'], row['Country'], row['Manager'],
+                                    row['EntraLastSync'], row['TrustType'], row['TotalStorage'], row['FreeStorage'], row['PhysicalMemory'],
                                     row['DeviceName'], row['SerialNumber']))
                     else:
                         # Insert a new record
                         cursor.execute('''INSERT INTO Devices (DeviceName, SerialNumber, User, DeviceID, OperatingSystem, OSVersion, Source, ComplianceState, Model, 
-                                       Manufacturer, MAC, IntuneLastSync, ReportTime, Encryption, DisplayName, JobTitle, Department, EmployeeID, City, Country, Manager,
+                                       Manufacturer, MAC, IntuneLastSync, ReportTime, Encryption, UserDisplayName, JobTitle, Department, EmployeeID, City, Country, Manager,
                                        EntraLastSync, TrustType, TotalStorage, FreeStorage)
-                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
                                     (row['DeviceName'], row['SerialNumber'], row['User'], row['DeviceID'], row['OperatingSystem'], row['OSVersion'], 'Cloud',
                                     row['ComplianceState'], row['Model'], row['Manufacturer'], row['MAC'], row['IntuneLastSync'], report_time_str, row['Encryption'],
-                                    row['DisplayName'], row['JobTitle'], row['Department'], row['EmployeeID'], row['City'], row['Country'], row['Manager'],
-                                    row['EntraLastSync'], row['TrustType'], row['TotalStorage'], row['FreeStorage']))
+                                    row['UserDisplayName'], row['JobTitle'], row['Department'], row['EmployeeID'], row['City'], row['Country'], row['Manager'],
+                                    row['EntraLastSync'], row['TrustType'], row['TotalStorage'], row['FreeStorage'], row['PhysicalMemory']))
 
                 conn.commit()
 
@@ -663,17 +724,19 @@ class DeviceInventoryApp:
             for device in devices:
                 user_principal_name = device.get('userPrincipalName', '')
                 device_id = device.get('azureADDeviceId', '')
+                intune_device_id = device.get('id', '')
                 if user_principal_name:
                     self.retrieve_user_details(access_token, user_principal_name, device)
                 if device_id:
                     self.retrieve_entra_devices(access_token, device_id, device)
+                    self.retrieve_device_memory(access_token, intune_device_id, device)
             return devices
         else:
             raise Exception(f"Failed to retrieve device information. Status code: {response.status_code}, Response: {response.text}")
         
     def retrieve_entra_devices(self, access_token, deviceId, device):
         # Get user details
-        entra_info_url = f"https://graph.microsoft.com/v1.0/devices?$filter=deviceId eq '{deviceId}'"
+        entra_info_url = f"https://graph.microsoft.com/v1.0/devices?$filter=deviceId eq '{deviceId}'&$select=createdDateTime,trustType"
         headers = {
             'Authorization': f'Bearer {access_token}',
             'Content-Type': 'application/json'
@@ -698,6 +761,34 @@ class DeviceInventoryApp:
                 print(f"Failed to retrieve Entra device details. Status code: {entra_info_response.status_code}, Response: {entra_info_response.text}")
         except Exception as e:
             print(f"Exception occurred while retrieving Entra device details: {str(e)}")
+
+    def retrieve_device_memory(self, access_token, deviceId, device):
+        # Get user details
+        memory_info_url = f"https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/{deviceId}?$select=physicalMemoryInBytes"
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Content-Type': 'application/json'
+        }
+
+        try:
+            # Request user details (excluding the manager field initially)
+            memory_info_response = requests.get(memory_info_url, headers=headers, verify=False, proxies=self.PROXIES)
+            if memory_info_response.status_code == 200:
+                memory_details = memory_info_response.json()
+
+                # Add default values for missing fields
+                physical_Memory = memory_details.get('physicalMemoryInBytes', 'N/A')
+
+                # Add manager display name to user details
+                memory_details['physical_Memory'] = physical_Memory
+
+                # Attach user details to the device
+                device.update(memory_details)
+            else:
+                print(f"Failed to retrieve memory details for {deviceId}. Status code: {memory_info_response.status_code}, Response: {memory_info_response.text}")
+
+        except Exception as e:
+            print(f"Exception occurred while retrieving memory details: {str(e)}")
 
     def retrieve_user_details(self, access_token, user_principal_name, device):
         # Get user details
@@ -759,7 +850,7 @@ class DeviceInventoryApp:
                 'ReportTime': time.strftime("%Y-%m-%d %H:%M:%S"),
                 'Source': 'Cloud',
                 'Encryption': str(device.get('isEncrypted', '')),
-                'DisplayName': device.get('displayName', ''),
+                'UserDisplayName': device.get('displayName', ''),
                 'JobTitle': device.get('jobTitle', 'N/A'),
                 'Department': device.get('department', 'N/A'),
                 'EmployeeID': device.get('employeeId', 'N/A'),
@@ -768,6 +859,7 @@ class DeviceInventoryApp:
                 'Manager': device.get('manager_displayName', ''),
                 'TotalStorage': device.get('totalStorageSpaceInBytes', 'N/A'),
                 'FreeStorage': device.get('freeStorageSpaceInBytes', 'N/A'),
+                'PhysicalMemory': device.get('physicalMemoryInBytes', 'N/A'),
                 'TrustType': device.get('trustType', '')
             }
 
@@ -944,7 +1036,8 @@ class DeviceInventoryApp:
             try:
                 # Retrieve the headers from the Devices table
                 columns = [
-                    'DeviceName', 'SerialNumber'
+                    'DeviceName', 'SerialNumber', 'OperatingSystem', 'OSVersion', 'Manufacturer', 'Model', 'TotalStorage', 
+                    'PhysicalMemory', 'UserDisplayName', 'Department', 'Country', 'City'
                 ]
                 # Create an empty DataFrame with the column headers
                 df = pd.DataFrame(columns=columns)
@@ -964,7 +1057,8 @@ class DeviceInventoryApp:
 
                 # Check for illegal columns
                 expected_columns = [
-                    'DeviceName', 'SerialNumber'
+                    'DeviceName', 'SerialNumber', 'OperatingSystem', 'OSVersion', 'Manufacturer', 'Model', 'TotalStorage', 
+                    'PhysicalMemory', 'UserDisplayName', 'Department', 'Country', 'City'
                 ]
                 illegal_columns = [col for col in new_data.columns if col not in expected_columns]
                 if illegal_columns:
@@ -990,9 +1084,13 @@ class DeviceInventoryApp:
                             report_time_str = report_time_str.strftime("%Y-%m-%d %H:%M:%S")
                         
                         # Insert or replace the record into Devices table
-                        cursor.execute('''REPLACE INTO Devices (DeviceName, SerialNumber, ReportTime)
-                                        VALUES (?, ?, ?)''',
-                                        (row['DeviceName'], row['SerialNumber'], report_time_str))
+                        cursor.execute('''REPLACE INTO Devices (DeviceName, SerialNumber, ReportTime, 'OperatingSystem', 'OSVersion', 
+                                       'Manufacturer', 'Model', 'TotalStorage', 
+                                        'PhysicalMemory', 'UserDisplayName', 'Department', 'Country', 'City')
+                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                                        (row['DeviceName'], row['SerialNumber'], report_time_str, row['OperatingSystem'], row['OSVersion'],
+                                         row['Manufacturer'], row['Model'], row['TotalStorage'], row['PhysicalMemory'],
+                                         row['UserDisplayName'], row['Department'], row['Country'], row['City']))
                     conn.commit()
                 messagebox.showinfo("Success", "Data uploaded successfully.")
                 self.load_data()
@@ -1032,11 +1130,21 @@ class DeviceInventoryApp:
         # Initialize selected columns
         self.selected_columns = self.columns_to_exclude.copy()
 
-        # Create Import menu
-        self.import_menu = tk.Menu(self.menubar, tearoff=0)
-        self.menubar.add_cascade(label="Import", menu=self.import_menu)
+        # Create Data menu
+        self.data_menu = tk.Menu(self.menubar, tearoff=0)
+        self.menubar.add_cascade(label="Data", menu=self.data_menu)
+        
+        # Create Import sub-menu
+        self.import_menu = tk.Menu(self.data_menu, tearoff=0)
+        self.data_menu.add_cascade(label="Import", menu=self.import_menu)
         self.import_menu.add_command(label="Download Template", command=self.download_template)
-        self.import_menu.add_command(label="Upload Data", command=self.upload_data)
+        self.import_menu.add_command(label="Import Data", command=self.upload_data)
+
+        # Create Export sub-menu
+        self.export_menu = tk.Menu(self.data_menu, tearoff=0)
+        self.data_menu.add_cascade(label="Export", menu=self.export_menu)
+        self.export_menu.add_command(label="Export View", command=self.export_view)
+        self.export_menu.add_command(label="Export Database", command=self.export_database)
 
         # Add Return option at the end of the menu
         self.menubar.add_command(label="Return", command=self.confirm_return)
@@ -1046,8 +1154,8 @@ class DeviceInventoryApp:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(1, weight=1)
 
-        self.search_filter_frame = tk.Frame(self.root, padx=10, pady=10, bg="#3E4C59")
-        self.search_filter_frame.pack(fill='x', pady=10)
+        self.search_filter_frame = tk.Frame(self.root, padx=10, pady=5, bg="#3E4C59")
+        self.search_filter_frame.pack(fill='x', pady=5)
         
         # Split the filter panel into two halves
         self.left_panel = tk.Frame(self.search_filter_frame, bg="#3E4C59")
@@ -1082,7 +1190,7 @@ class DeviceInventoryApp:
         self.search_label.grid(row=0, column=0, padx=5, pady=5, sticky="w")
         self.search_entry = tk.Entry(self.left_panel, font=("Arial", 10), bg="#F0F0F0", fg="#000000")
         self.search_entry.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
-        self.clear_search_button = tk.Button(self.left_panel, text="Clear Search", command=self.clear_search_entry, font=("Arial", 10), bg="#4A5568", fg="#E4E7EB", activebackground="#6B7280")
+        self.clear_search_button = tk.Button(self.left_panel, text="Clear Search", command=self.clear_search_entry, font=("Arial", 9), bg="#4A5568", fg="#E4E7EB", activebackground="#6B7280")
         self.clear_search_button.grid(row=0, column=2, padx=5, pady=5, sticky="w")
 
         self.search_filter_frame.columnconfigure(1, weight=1)
@@ -1090,66 +1198,45 @@ class DeviceInventoryApp:
         # Filter UI for two filters with operator
         self.filter_labels = []
         self.filter_column_comboboxes = []
-        self.filter_value_comboboxes = []
+        self.filter_operator_comboboxes = []
+        self.filter_value_entries = []
 
-        # Filter 1
-        filter_label_1 = tk.Label(self.left_panel, text="Filter 1:", font=("Arial", 10, "bold"), fg="#E4E7EB", bg="#3E4C59")
-        filter_label_1.grid(row=1, column=0, padx=5, pady=5, sticky="w")
-        self.filter_labels.append(filter_label_1)
+        for i in range(3):  # Creating 3 filters
+            row = i + 1
+            # Filter Label
+            filter_label = tk.Label(self.left_panel, text=f"Filter {i + 1}:", font=("Arial", 10, "bold"), fg="#E4E7EB", bg="#3E4C59")
+            filter_label.grid(row=row, column=0, padx=5, pady=5, sticky="w")  # Consistent padding
+            self.filter_labels.append(filter_label)
 
-        filter_column_combobox_1 = ttk.Combobox(self.left_panel, values=["", "OperatingSystem", "Source", "Remarks"], state="readonly")
-        filter_column_combobox_1.grid(row=1, column=1, padx=5, pady=5, sticky="ew")
-        filter_column_combobox_1.bind("<<ComboboxSelected>>", lambda event, index=0: self.update_filter_values(event, index))
-        self.filter_column_comboboxes.append(filter_column_combobox_1)
+            # Filter Column Combobox
+            filter_column_combobox = ttk.Combobox(self.left_panel, values=["", "OperatingSystem", "Source", "Remarks"], state="readonly")
+            filter_column_combobox.grid(row=row, column=1, padx=5, pady=5, sticky="ew")
+            self.filter_column_comboboxes.append(filter_column_combobox)
 
-        filter_value_combobox_1 = ttk.Combobox(self.left_panel, state="readonly")
-        filter_value_combobox_1.grid(row=1, column=2, padx=5, pady=5, sticky="ew")
-        filter_value_combobox_1.configure(state="disabled")
-        self.filter_value_comboboxes.append(filter_value_combobox_1)
+            # Filter Operator Combobox
+            filter_operator_combobox = ttk.Combobox(self.left_panel, values=["equals", "does not equal", "contains", "does not contain", "begins with", "does not begin with", "ends with", "does not end with"], state="readonly")
+            filter_operator_combobox.set("equals")
+            filter_operator_combobox.grid(row=row, column=2, padx=5, pady=5, sticky="ew")
+            self.filter_operator_comboboxes.append(filter_operator_combobox)
 
-        # Operator combobox
+            # Filter Value Entry
+            filter_value_entry = tk.Entry(self.left_panel, font=("Arial", 10), bg="#F0F0F0", fg="#000000")
+            filter_value_entry.grid(row=row, column=3, padx=5, pady=5, sticky="ew")
+            self.filter_value_entries.append(filter_value_entry)
+
+        # Global Operator Combobox
         self.operator_label = tk.Label(self.left_panel, text="Operator:", font=("Arial", 10, "bold"), fg="#E4E7EB", bg="#3E4C59")
-        self.operator_label.grid(row=1, column=3, padx=5, pady=5, sticky="ew")
+        self.operator_label.grid(row=1, column=4, padx=5, pady=5, sticky="w")
         self.operator_combobox = ttk.Combobox(self.left_panel, values=["AND", "OR"], state="readonly")
-        self.operator_combobox.grid(row=1, column=4, padx=5, pady=5, sticky="ew")
         self.operator_combobox.set("AND")
-
-        # Filter 2
-        filter_label_2 = tk.Label(self.left_panel, text="Filter 2:", font=("Arial", 10, "bold"), fg="#E4E7EB", bg="#3E4C59")
-        filter_label_2.grid(row=2, column=0, padx=5, pady=5, sticky="w")
-        self.filter_labels.append(filter_label_2)
-
-        filter_column_combobox_2 = ttk.Combobox(self.left_panel, values=["", "OperatingSystem", "Source", "Remarks"], state="readonly")
-        filter_column_combobox_2.grid(row=2, column=1, padx=5, pady=5, sticky="ew")
-        filter_column_combobox_2.bind("<<ComboboxSelected>>", lambda event, index=1: self.update_filter_values(event, index))
-        self.filter_column_comboboxes.append(filter_column_combobox_2)
-
-        filter_value_combobox_2 = ttk.Combobox(self.left_panel, state="readonly")
-        filter_value_combobox_2.grid(row=2, column=2, padx=5, pady=5, sticky="ew")
-        filter_value_combobox_2.configure(state="disabled")
-        self.filter_value_comboboxes.append(filter_value_combobox_2)
-
-        # Filter 3
-        filter_label_3 = tk.Label(self.left_panel, text="Filter 3:", font=("Arial", 10, "bold"), fg="#E4E7EB", bg="#3E4C59")
-        filter_label_3.grid(row=3, column=0, padx=5, pady=5, sticky="w")
-        self.filter_labels.append(filter_label_3)
-
-        filter_column_combobox_3 = ttk.Combobox(self.left_panel, values=["", "OperatingSystem", "Source", "Remarks"], state="readonly")
-        filter_column_combobox_3.grid(row=3, column=1, padx=5, pady=5, sticky="ew")
-        filter_column_combobox_3.bind("<<ComboboxSelected>>", lambda event, index=2: self.update_filter_values(event, index))
-        self.filter_column_comboboxes.append(filter_column_combobox_3)
-
-        filter_value_combobox_3 = ttk.Combobox(self.left_panel, state="readonly")
-        filter_value_combobox_3.grid(row=3, column=2, padx=5, pady=5, sticky="ew")
-        filter_value_combobox_3.configure(state="disabled")
-        self.filter_value_comboboxes.append(filter_value_combobox_3)
+        self.operator_combobox.grid(row=1, column=5, padx=5, pady=5, sticky="ew")
 
         # Apply and Clear buttons
-        self.apply_button = tk.Button(self.left_panel, text="Apply", command=self.apply_filters, font=("Arial", 10), bg="#4A5568", fg="#E4E7EB", anchor="c", activebackground="#6B7280")
-        self.apply_button.grid(row=2, column=4, rowspan=2, pady=10, padx=5, sticky="w")
+        self.apply_button = tk.Button(self.left_panel, text="Apply", command=self.apply_filters, font=("Arial", 9), bg="#4A5568", fg="#E4E7EB", activebackground="#6B7280")
+        self.apply_button.grid(row=2, column=4, columnspan=2, pady=5, padx=5, sticky="ew")
 
-        self.clear_button = tk.Button(self.left_panel, text="Clear", command=self.clear_filters, font=("Arial", 10), bg="#4A5568", fg="#E4E7EB", anchor="c", activebackground="#6B7280")
-        self.clear_button.grid(row=2, column=4, rowspan=2, pady=10, padx=5, sticky="e")
+        self.clear_button = tk.Button(self.left_panel, text="Clear", command=self.clear_filters, font=("Arial", 9), bg="#4A5568", fg="#E4E7EB", activebackground="#6B7280")
+        self.clear_button.grid(row=3, column=4, columnspan=2, pady=5, padx=5, sticky="ew")
 
         # Treeview to display data
         self.tree_frame = tk.Frame(self.root, bg="#3E4C59")
@@ -1209,6 +1296,36 @@ class DeviceInventoryApp:
 
         # Update the display
         self.root.update()
+
+    def export_view(self):
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel files", "*.xlsx")],
+            title="Export View"
+        )
+        if file_path:
+            try:
+                # Export the filtered data to an Excel file
+                self.filtered_data.to_excel(file_path, index=False)
+                messagebox.showinfo("Success", "Filtered view exported successfully.")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to export view: {e}")
+    
+    def export_database(self):
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel files", "*.xlsx")],
+            title="Export Database"
+        )
+        if file_path:
+            try:
+                # Export the entire database to an Excel file
+                with sqlite3.connect('inventory.db', timeout=30) as conn:
+                    data = pd.read_sql_query("SELECT * FROM Devices", conn)
+                    data.to_excel(file_path, index=False)
+                messagebox.showinfo("Success", "Database exported successfully.")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to export database: {e}")
 
     def toggle_column(self, column):
         if column in self.selected_columns:
@@ -1300,8 +1417,7 @@ class DeviceInventoryApp:
 
     def update_filter_columns(self):
         # Update filter column options based on the selected columns in the treeview
-        columns_to_exclude = ["DeviceName", "SerialNumber", "IntuneLastSync", "DeviceID", "User", "OSVersion", "MAC", "ReportTime", "DisplayName", "EmployeeID", "EntraLastSync",
-                              "TotalStorage", "FreeStorage"]
+        columns_to_exclude = ['DeviceName','SerialNumber','DeviceID','MAC','ReportTime','EntraLastSync','IntuneLastSync']
         available_values = ["", *[col for col in self.selected_columns if col not in columns_to_exclude]]
         for combobox in self.filter_column_comboboxes:
             combobox["values"] = available_values
@@ -1309,17 +1425,27 @@ class DeviceInventoryApp:
                 combobox.set("")
 
     def clear_search_and_filters_inputs(self):
-        # Clear search entry
+        # Clear the search entry field
         self.search_entry.delete(0, tk.END)
 
-        # Clear filter comboboxes and reset their values
-        for combobox in self.filter_column_comboboxes:
-            combobox.set("")
-        for combobox in self.filter_value_comboboxes:
-            combobox.set("")
-            combobox.configure(state="disabled")  # Disable value comboboxes until a filter column is selected
+        # Reset filter comboboxes
+        for i, combobox in enumerate(self.filter_column_comboboxes):
+            if isinstance(combobox, ttk.Combobox):  # Ensure it's a Combobox
+                combobox.set("")  # Clear Comboboxes (filter column selectors)
+            else:
+                print(f"Unexpected widget in filter_column_comboboxes at index {i}: {type(combobox)}")
 
-        # Reset the operator combobox to its default value
+        # Reset value entries (handles both Entry and Combobox types)
+        for i, entry in enumerate(self.filter_value_entries):
+            if isinstance(entry, ttk.Combobox):  # If it's a Combobox, reset it
+                entry.set("")
+            elif isinstance(entry, tk.Entry):  # If it's an Entry widget, clear it
+                entry.delete(0, tk.END)
+                entry.configure(state="normal")  # Enable Entry widget in case it's disabled
+            else:
+                print(f"Unexpected widget in filter_value_entries at index {i}: {type(entry)}")
+
+        # Reset the logical operator combobox
         self.operator_combobox.set("AND")
 
     def force_redraw(self):
@@ -1360,17 +1486,26 @@ class DeviceInventoryApp:
         threading.Thread(target=self.run_refresh_data, args=(progress_window, progress, None)).start()
 
     def clear_search_and_filters_inputs(self):
-        # Clear search entry
+
+        # Clear the search entry field
         self.search_entry.delete(0, tk.END)
 
-        # Clear filter comboboxes and reset their values
-        for combobox in self.filter_column_comboboxes:
-            combobox.set("")
-        for combobox in self.filter_value_comboboxes:
-            combobox.set("")
-            combobox.configure(state="disabled")  # Disable value comboboxes until a filter column is selected
+        # Reset filter column comboboxes
+        for i, combobox in enumerate(self.filter_column_comboboxes):
+            if isinstance(combobox, ttk.Combobox):  # Ensure it's a Combobox
+                combobox.set("")  # Clear Combobox values
+            else:
+                print(f"Unexpected widget in filter_column_comboboxes at index {i}: {type(combobox)}")
 
-        # Reset the operator combobox to its default value
+        # Clear filter value entries (tk.Entry widgets)
+        for i, entry in enumerate(self.filter_value_entries):
+            if isinstance(entry, tk.Entry):  # Ensure it's an Entry widget
+                entry.delete(0, tk.END)  # Clear the text
+                entry.configure(state="normal")  # Ensure Entry is enabled
+            else:
+                print(f"Unexpected widget in filter_value_entries at index {i}: {type(entry)}")
+
+        # Reset the logical operator combobox
         self.operator_combobox.set("AND")
 
     def run_refresh_data(self, progress_window, progress, *args):
@@ -1425,25 +1560,25 @@ class DeviceInventoryApp:
                                                     User = ?, OperatingSystem = ?, DeviceID = ?, OSVersion = ?,
                                                     ComplianceState = ?, Model = ?, Manufacturer = ?, Source = ?,
                                                     MAC = ?, Encryption = ?, IntuneLastSync = ?, ReportTime = ?,
-                                                    DisplayName = ?, JobTitle = ?, Department = ?, EmployeeID = ?, 
+                                                    UserDisplayName = ?, JobTitle = ?, Department = ?, EmployeeID = ?, 
                                                     City = ?, Country = ?, Manager = ?, EntraLastSync = ?, 
-                                                    TrustType = ?, TotalStorage = ?, FreeStorage = ? 
+                                                    TrustType = ?, TotalStorage = ?, FreeStorage = ?, PhysicalMemory = ? 
                                                     WHERE DeviceName = ? AND SerialNumber = ?''', 
                                                 (new_row['User'], new_row['OperatingSystem'], new_row['DeviceID'], new_row['OSVersion'],
                                                 new_row['ComplianceState'], new_row['Model'], new_row['Manufacturer'], source_value,
                                                 new_row['MAC'], new_row['Encryption'], new_row['IntuneLastSync'], report_time_str,
-                                                new_row['DisplayName'], new_row['JobTitle'], new_row['Department'], new_row['EmployeeID'], 
-                                                new_row['City'], new_row['Country'], new_row['Manager'], 
-                                                new_row['EntraLastSync'], new_row['TrustType'], new_row['TotalStorage'], new_row['FreeStorage'],
+                                                new_row['UserDisplayName'], new_row['JobTitle'], new_row['Department'], new_row['EmployeeID'], 
+                                                new_row['City'], new_row['Country'], new_row['Manager'], new_row['EntraLastSync'],
+                                                new_row['TrustType'], new_row['TotalStorage'], new_row['FreeStorage'], new_row['PhysicalMemory'],
                                                 device_name, serial_number))
                     else:
-                        thread_cursor.execute('REPLACE INTO Devices VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', 
+                        thread_cursor.execute('REPLACE INTO Devices VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', 
                                             (device_name, serial_number, new_row['User'], new_row['DeviceID'],
                                             new_row['OperatingSystem'], new_row['OSVersion'], new_row['ComplianceState'], 'Cloud',
                                             new_row['Model'], new_row['Manufacturer'], new_row['MAC'], new_row['IntuneLastSync'],
-                                            report_time_str, new_row['Encryption'], new_row['DisplayName'], new_row['JobTitle'], new_row['Department'], 
-                                            new_row['EmployeeID'], new_row['City'], new_row['Country'], new_row['Manager'],
-                                            new_row['EntraLastSync'], new_row['TrustType'], new_row['TotalStorage'], new_row['FreeStorage'],))
+                                            report_time_str, new_row['Encryption'], new_row['UserDisplayName'], new_row['JobTitle'], new_row['Department'], 
+                                            new_row['EmployeeID'], new_row['City'], new_row['Country'], new_row['Manager'], new_row['EntraLastSync'], 
+                                            new_row['TrustType'], new_row['TotalStorage'], new_row['FreeStorage'], new_row['PhysicalMemory']))
 
                 # Step: Identify records in the database but not in the latest Excel data and update Source to "Local"                
                 thread_cursor.execute("SELECT SerialNumber, DeviceName, Source FROM Devices")
@@ -1584,58 +1719,103 @@ class DeviceInventoryApp:
         selected_column = self.filter_column_comboboxes[index].get()
         if self.data is not None and selected_column and selected_column != "":
             unique_values = self.data[selected_column].dropna().unique()
-            self.filter_value_comboboxes[index]["values"] = list(unique_values)
-            self.filter_value_comboboxes[index].set("")
-            self.filter_value_comboboxes[index].configure(state="readonly")
+            self.filter_value_entries[index]["values"] = list(unique_values)
+            self.filter_value_entries[index].set("")
+            self.filter_value_entries[index].configure(state="readonly")
         else:
             # If blank option is selected, disable the value combobox
-            self.filter_value_comboboxes[index].set("")
-            self.filter_value_comboboxes[index].configure(state="disabled")
+            self.filter_value_entries[index].set("")
+            self.filter_value_entries[index].configure(state="disabled")
 
     def apply_filters(self):
-        # Apply filters to the data
-        if self.data is not None:
-            filtered_data = self.data.copy()
+        # Get the search query
+        search_query = self.search_entry.get().strip().lower()
 
-            # Apply search filter if a search term is present
-            search_term = self.search_entry.get().strip().lower()
-            if search_term:
-                # Search only across visible columns using vectorized str.contains()
-                visible_columns = list(self.tree["column"])
-                filtered_data = filtered_data.apply(
-                    lambda row: row[visible_columns].astype(str).str.lower().str.contains(re.escape(search_term)).any(), axis=1
-                )
-                filtered_data = self.data.loc[filtered_data]
+        # Start with the full dataset
+        filtered_data = self.data.copy()
 
-            # Apply filter conditions
-            filter_conditions = []
-            for i in range(len(self.filter_column_comboboxes)):
-                column = self.filter_column_comboboxes[i].get()
-                value = self.filter_value_comboboxes[i].get()
-                if column and value:
-                    filter_conditions.append(self.data[column].astype(str).str.fullmatch(re.escape(value), case=False, na=False))
+        # Apply the search query only to visible columns in the TreeView
+        visible_columns = list(self.tree["columns"])
+        if search_query and visible_columns:
+            try:
+                # Filter rows where the search query matches any value in visible columns
+                filtered_data = filtered_data[
+                    filtered_data[visible_columns].apply(
+                        lambda row: search_query in ' '.join(row.astype(str).str.lower()), axis=1
+                    )
+                ]
+            except KeyError as e:
+                print(f"KeyError in search operation: {e}")
+                messagebox.showerror("Error", "One or more displayed columns are missing in the data.")
+                return
 
-            if filter_conditions:
-                operator = self.operator_combobox.get()
-                combined_condition = filter_conditions[0]
-                for condition in filter_conditions[1:]:
-                    if operator == "AND":
-                        combined_condition &= condition
-                    elif operator == "OR":
-                        combined_condition |= condition
+        # Initialize a list to store conditions for each filter
+        conditions = []
 
-                filtered_data = filtered_data.loc[combined_condition]
+        # Apply each individual filter
+        for i in range(len(self.filter_column_comboboxes)):
+            column = self.filter_column_comboboxes[i].get()  # Get the selected column for filtering
+            operator = self.filter_operator_comboboxes[i].get()  # Get the selected operator
+            value = self.filter_value_entries[i].get().strip()  # Get the filter value
 
-            # Update filtered data and reset pagination
-            self.filtered_data = filtered_data.copy()
-            self.current_page = 0  # Reset to first page after applying filters
-            self.display_data(self.filtered_data)
-            self.update_total_records(self.filtered_data)
+            if column and operator and value:  # Apply filter only if all fields are filled
+                try:
+                    column_data = filtered_data[column].astype(str).str.lower()  # Normalize case
+                except KeyError as e:
+                    print(f"KeyError in filter operation: {e}")
+                    messagebox.showerror("Error", f"Column '{column}' is missing in the data.")
+                    return
 
-            # Update the page number label to reflect the filtered data
-            self.update_page_number_label()
-        else:
-            messagebox.showinfo("Info", "Please load data first.")
+                value = value.lower()
+
+                # Apply the filter based on the operator
+                if operator == "equals":
+                    condition = column_data == value
+                elif operator == "does not equal":
+                    condition = column_data != value
+                elif operator == "contains":
+                    condition = column_data.str.contains(value, na=False)
+                elif operator == "does not contain":
+                    condition = ~column_data.str.contains(value, na=False)
+                elif operator == "begins with":
+                    condition = column_data.str.startswith(value, na=False)
+                elif operator == "does not begin with":
+                    condition = ~column_data.str.startswith(value, na=False)
+                elif operator == "ends with":
+                    condition = column_data.str.endswith(value, na=False)
+                elif operator == "does not end with":
+                    condition = ~column_data.str.endswith(value, na=False)
+                else:
+                    condition = None
+
+                if condition is not None:
+                    conditions.append(condition)
+
+        # Combine conditions using the selected global operator
+        if conditions:
+            global_operator = self.operator_combobox.get().strip()
+            if global_operator == "AND":
+                # Combine all conditions with AND
+                combined_condition = conditions[0]
+                for condition in conditions[1:]:
+                    combined_condition &= condition
+            elif global_operator == "OR":
+                # Combine all conditions with OR
+                combined_condition = conditions[0]
+                for condition in conditions[1:]:
+                    combined_condition |= condition
+            else:
+                combined_condition = None
+
+            if combined_condition is not None:
+                filtered_data = filtered_data[combined_condition]
+
+        # Update the filtered data and reset pagination
+        self.filtered_data = filtered_data.copy()
+        self.current_page = 0  # Reset to the first page
+        self.display_data(self.filtered_data)  # Display the updated data
+        self.update_total_records(self.filtered_data)  # Update record count
+        self.update_page_number_label()  # Update pagination display
 
     def clear_filters(self):
         if self.data is not None:
@@ -1644,13 +1824,13 @@ class DeviceInventoryApp:
             self.display_data(self.filtered_data)
             self.update_total_records(self.filtered_data)
             self.update_page_number_label()  # Update the page number label
-            
+
             # Clear search and filter inputs
             self.search_entry.delete(0, tk.END)
             for i in range(len(self.filter_column_comboboxes)):
                 self.filter_column_comboboxes[i].set("")
-                self.filter_value_comboboxes[i].set("")
-                self.filter_value_comboboxes[i].configure(state="disabled")
+                self.filter_operator_comboboxes[i].set("equals")  # Reset to default operator
+                self.filter_value_entries[i].delete(0, tk.END)  # Clear the text entry
             self.operator_combobox.set("AND")
         else:
             messagebox.showinfo("Info", "Please load data first.")
