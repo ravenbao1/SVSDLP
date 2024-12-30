@@ -35,7 +35,9 @@ class DeviceInventoryApp:
             self.session.proxies.clear()
 
         # Intune Graph API credentials
-
+        self.client_id = '2ca3083d-78b8-4fe5-a509-f0ea09d2f7da'
+        self.client_secret = 'F0-8Q~vY.lPo.4cXpAIQ-xzlV4wDRBbQsIvmbctE'
+        self.tenant_id = '1acfda79-c7e2-4b4b-8bcc-06449fbe9213'
         self.authority = f"https://login.microsoftonline.com/{self.tenant_id}"
         self.scope = ["User.Read"]
 
@@ -1075,56 +1077,159 @@ class DeviceInventoryApp:
             columns_mapping = {col: idx for idx, col in enumerate(self.tree["columns"])}
             device_name = str(item_values[columns_mapping["DeviceName"]])  
             serial_number = str(item_values[columns_mapping["SerialNumber"]])  
-            
+
             # Retrieve DeviceID from the database
             self.cursor.execute("SELECT EntraDeviceID FROM Devices WHERE DeviceName = ? AND SerialNumber = ?", (device_name, serial_number))
             result = self.cursor.fetchone()
             if result:
-                deviceId = result[0]
+                entra_device_id = result[0]
             else:
-                messagebox.showerror("Error", "Device ID not found for the selected device.")
-                return
-            
-        # Get memory details        
-        try:
-            # Retrieve all BitLocker recovery keys from Microsoft Graph API
-            access_token = self.get_access_token()
-            headers = {
-                'Authorization': f'Bearer {access_token}',
-                'Content-Type': 'application/json'
-            }
-            memory_info_url = f"https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/{deviceId}?$select=physicalMemoryInBytes"
-            memory_info_response = requests.get(memory_info_url, headers=headers, verify=False, proxies=self.PROXIES)
+                messagebox.showerror("Error", "Entra Device ID not found for the selected device.")
 
-            if memory_info_response.status_code == 200:
-                physical_memory = memory_info_response.json().get('physicalMemoryInBytes', 'N/A')
+            self.cursor.execute("SELECT IntuneDeviceID FROM Devices WHERE DeviceName = ? AND SerialNumber = ?", (device_name, serial_number))
+            result = self.cursor.fetchone()
+            if result:
+                intune_device_id = result[0]
+            else:
+                messagebox.showerror("Error", "Intune Device ID not found for the selected device.")    
 
-                if physical_memory:
-                    # Update or insert the remark in the database using the correct Serial Number and Device Name
-                    self.cursor.execute("REPLACE INTO Memory (SerialNumber, DeviceName, PhysicalMemory) VALUES (?, ?, ?)",
-                                        (serial_number, device_name, physical_memory))
+            try:
+                # Authenticate and get the access token
+                access_token = self.get_access_token()
+                headers = {
+                    'Authorization': f'Bearer {access_token}',
+                    'Content-Type': 'application/json'
+                }
+
+                # Retrieve device details from Microsoft Graph API
+                device_url = f"https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/{intune_device_id}"
+                response = requests.get(device_url, headers=headers, verify=False, proxies=self.PROXIES)
+                
+                if response.status_code == 200:
+                    device_data = response.json()
+                    total_storage = device_data.get('totalStorageSpaceInBytes', '')
+                    free_storage = device_data.get('freeStorageSpaceInBytes', '')
+
+                    # Convert to GB and round to the nearest integer if the value is not 'N/A'
+                    total_storage_gb = int(round(total_storage / (1024 ** 3))) if isinstance(total_storage, (int, float)) and total_storage != '' else ''
+                    free_storage_gb = int(round(free_storage / (1024 ** 3))) if isinstance(free_storage, (int, float)) and free_storage != '' else ''
+                    updated_values = {
+                        "OperatingSystem": device_data.get("operatingSystem", ""),
+                        "OSVersion": device_data.get("osVersion", ""),
+                        "ComplianceState": device_data.get("complianceState", ""),
+                        "Manufacturer": device_data.get("manufacturer", ""),
+                        "Model": device_data.get("model", ""),
+                        "IntuneLastSync": device_data.get("lastSyncDateTime", ""),                
+                        'EntraDeviceID': device_data.get('EntraDeviceID', ""),
+                        'IntuneDeviceID': device_data.get('IntuneDeviceID', ""),
+                        'UserPrincipalName': device_data.get('UserPrincipalName', ""),                        
+                        'MAC': device_data.get('MAC', ""),                        
+                        'ReportTime': time.strftime("%Y-%m-%d %H:%M:%S"),
+                        'Source': "Intune",
+                        'Encryption': device_data.get('Encryption', ""),                        
+                        'TotalStorage': total_storage_gb,
+                        'FreeStorage': free_storage_gb
+                    }
+
+                    # Retrieve physical memory details from the separate API
+                    memory_url = f"https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/{intune_device_id}?$select=physicalMemoryInBytes"
+                    memory_response = requests.get(memory_url, headers=headers, verify=False, proxies=self.PROXIES)
+
+                    if memory_response.status_code == 200:
+                        memory_data = memory_response.json()
+                        physical_memory = memory_data.get("physicalMemoryInBytes", 0)
+                        physical_memory_gb = int(round(physical_memory / (1024 ** 3))) if isinstance(physical_memory, (int, float)) and physical_memory != '' else ''
+                        updated_values["PhysicalMemory"] = physical_memory_gb
+                    else:
+                        updated_values["PhysicalMemory"] = ""
+
+                    # Retrieve user details
+                    user_principal_name = device_data.get("userPrincipalName", "")
+                    if user_principal_name:
+                        user_url = f"https://graph.microsoft.com/v1.0/users/{user_principal_name}?$select=displayName,jobTitle,department,city,country"
+                        user_response = requests.get(user_url, headers=headers, verify=False, proxies=self.PROXIES)
+
+                        if user_response.status_code == 200:
+                            user_data = user_response.json()
+                            updated_values.update({
+                                "UserDisplayName": user_data.get("displayName", ""),
+                                "JobTitle": user_data.get("jobTitle", ""),
+                                "Department": user_data.get("department", ""),
+                                "City": user_data.get("city", ""),
+                                "Country": user_data.get("country", "")
+                            })
+
+                    # Retrieve Entra device details for trustType
+                    entra_device_url = f"https://graph.microsoft.com/v1.0/devices?$filter=deviceId eq '{entra_device_id}'&$select=trustType"
+                    entra_response = requests.get(entra_device_url, headers=headers, verify=False, proxies=self.PROXIES)
+
+                    if entra_response.status_code == 200:
+                        entra_data = entra_response.json().get("value", [])
+                        if entra_data:
+                            updated_values["TrustType"] = entra_data[0].get("trustType", "")
+                        else:
+                            updated_values["TrustType"] = ""
+
+                    # Update the database
+                    self.cursor.execute('''UPDATE Devices SET 
+                                            OperatingSystem = ?,
+                                            OSVersion = ?,
+                                            ComplianceState = ?,
+                                            Manufacturer = ?,
+                                            Model = ?,
+                                            IntuneLastSync = ?,
+                                            EntraDeviceID = ?,
+                                            IntuneDeviceID = ?,
+                                            UserPrincipalName = ?,
+                                            MAC = ?,
+                                            ReportTime = ?
+                                            TotalStorage = ?,
+                                            FreeStorage = ?,
+                                            PhysicalMemory = ?,
+                                            UserDisplayName = ?,
+                                            JobTitle = ?,
+                                            Department = ?,
+                                            City = ?,
+                                            Country = ?,
+                                            TrustType = ?
+                                            WHERE DeviceName = ? AND SerialNumber = ?''',
+                                        (
+                                            updated_values["OperatingSystem"],
+                                            updated_values["OSVersion"],
+                                            updated_values["ComplianceState"],
+                                            updated_values["Manufacturer"],
+                                            updated_values["Model"],
+                                            updated_values["IntuneLastSync"],
+                                            updated_values["EntraDeviceID"],
+                                            updated_values["IntuneDeviceID"],
+                                            updated_values["UserPrincipalName"],
+                                            updated_values["MAC"],
+                                            updated_values["TotalStorage"],
+                                            updated_values["FreeStorage"],
+                                            updated_values["PhysicalMemory"],
+                                            updated_values.get("UserDisplayName", ""),
+                                            updated_values.get("JobTitle", ""),
+                                            updated_values.get("Department", ""),
+                                            updated_values.get("City", ""),
+                                            updated_values.get("Country", ""),
+                                            updated_values.get("TrustType", ""),
+                                            device_name,
+                                            serial_number
+                                        ))
                     self.conn.commit()
 
-                    # Update the remark in both self.data and self.filtered_data DataFrames to keep them consistent
-                    self.data.loc[(self.data['SerialNumber'].str.strip().str.lower() == serial_number) &
-                                (self.data['DeviceName'].str.strip().str.lower() == device_name), 'PhysicalMemory'] = physical_memory
+                    # Update the data in the TreeView
+                    for col, idx in columns_mapping.items():
+                        if col in updated_values:
+                            self.tree.set(selected_item, column=col, value=updated_values[col])
 
-                    # Update the database with the modified Source value
-                    self.conn.commit()
+                    messagebox.showinfo("Success", "Device information updated successfully.")
 
-                    # Update filtered data directly if the item is present
-                    if not self.filtered_data.empty:
-                        self.filtered_data.loc[(self.filtered_data['SerialNumber'].str.strip().str.lower() == serial_number) &
-                                            (self.filtered_data['DeviceName'].str.strip().str.lower() == device_name), 'PhysicalMemory'] = physical_memory
+                else:
+                    messagebox.showerror("Error", f"Failed to refresh device information. Status code: {response.status_code}, Response: {response.text}")
 
-                    # Refresh the displayed data to reflect the changes
-                    self.display_data(self.filtered_data)
-                    self.update_total_records(self.filtered_data)
-            else:
-                messagebox.showerror("Error", f"Failed to retrieve memory details for {deviceId}. Status code: {memory_info_response.status_code}, Response: {memory_info_response.text}")
-
-        except Exception as e:
-            messagebox.showerror("Error", f"Exception occurred while retrieving memory details: {str(e)}")
+            except Exception as e:
+                messagebox.showerror("Error", f"An error occurred while refreshing device information: {str(e)}")
 
     def retrieve_user_details(self, access_token, user_principal_name, device):
         # Get user details
@@ -1217,12 +1322,10 @@ class DeviceInventoryApp:
             # Convert TotalStorage, FreeStorage, and PhysicalMemory from bytes to GB
             total_storage = row['TotalStorage']
             free_storage = row['FreeStorage']
-            #physical_memory = row['PhysicalMemory']
 
             # Convert to GB and round to the nearest integer if the value is not 'N/A'
             total_storage_gb = int(round(total_storage / (1024 ** 3))) if isinstance(total_storage, (int, float)) and total_storage != '' else ''
             free_storage_gb = int(round(free_storage / (1024 ** 3))) if isinstance(free_storage, (int, float)) and free_storage != '' else ''
-            #physical_memory_gb = int(round(physical_memory / (1024 ** 3))) if isinstance(physical_memory, (int, float)) and physical_memory != '' else ''
             device_data = {
                 'DeviceName': str(row['DeviceName']),
                 'SerialNumber': str(row['SerialNumber']),
