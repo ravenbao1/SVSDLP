@@ -35,9 +35,7 @@ class DeviceInventoryApp:
             self.session.proxies.clear()
 
         # Intune Graph API credentials
-        self.client_id = '2ca3083d-78b8-4fe5-a509-f0ea09d2f7da'
-        self.client_secret = 'F0-8Q~vY.lPo.4cXpAIQ-xzlV4wDRBbQsIvmbctE'
-        self.tenant_id = '1acfda79-c7e2-4b4b-8bcc-06449fbe9213'
+
         self.authority = f"https://login.microsoftonline.com/{self.tenant_id}"
         self.scope = ["User.Read"]
 
@@ -1986,17 +1984,27 @@ class DeviceInventoryApp:
         # Adjust window width to match the selected columns
         self.adjust_window_width()
 
+        # Update filter comboboxes with the new list of columns
+        self.update_filter_columns()
+
         # Refresh the display
         self.root.update_idletasks()
 
     def update_filter_columns(self):
-        # Update filter column options based on the selected columns in the treeview
-        columns_to_exclude = ['SerialNumber','IntuneDeviceID', 'EntraDeviceID', 'MAC','ReportTime','IntuneLastSync']
-        available_values = ["", *[col for col in self.selected_columns if col not in columns_to_exclude]]
+        """
+        Update the filter comboboxes with the current list of columns in the TreeView.
+        """
+        # Define columns to exclude from filtering
+        columns_to_exclude = ['SerialNumber', 'IntuneDeviceID', 'EntraDeviceID', 'MAC', 'ReportTime', 'IntuneLastSync']
+
+        # Create the list of available columns for filtering
+        available_columns = [col for col in self.selected_columns if col not in columns_to_exclude]
+
+        # Update each filter column combobox with the available columns
         for combobox in self.filter_column_comboboxes:
-            combobox["values"] = available_values
-            if combobox.get() not in available_values:
-                combobox.set("")
+            combobox["values"] = [""] + available_columns
+            if combobox.get() not in available_columns:
+                combobox.set("")  # Reset combobox if the current value is not valid
 
     def clear_search_and_filters_inputs(self):
         # Clear the search entry field
@@ -2289,19 +2297,6 @@ class DeviceInventoryApp:
         total_pages = (len(self.filtered_data) - 1) // self.page_size + 1
         current_page_display = self.current_page + 1  # Pages start at 1 for display purposes
         self.page_number_label.config(text=f"Page {current_page_display} / {total_pages}")
-
-    def update_filter_values(self, event, index):
-        # Update the filter value combobox for the selected filter
-        selected_column = self.filter_column_comboboxes[index].get()
-        if self.data is not None and selected_column and selected_column != "":
-            unique_values = self.data[selected_column].dropna().unique()
-            self.filter_value_entries[index]["values"] = list(unique_values)
-            self.filter_value_entries[index].set("")
-            self.filter_value_entries[index].configure(state="readonly")
-        else:
-            # If blank option is selected, disable the value combobox
-            self.filter_value_entries[index].set("")
-            self.filter_value_entries[index].configure(state="disabled")
 
     def apply_filters(self):
         # Get the search query
