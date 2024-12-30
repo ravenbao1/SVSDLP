@@ -9,6 +9,7 @@ import numpy as np
 import traceback
 import requests
 import urllib3
+import os
 from msal import PublicClientApplication
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -16,7 +17,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 class DeviceInventoryApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("Device Inventory Viewer")            
+        self.root.title("Device Inventory Viewer")       
 
         # Proxy configuration
         self.PROXY_URL = "http://gosurf.ocbc.local:8080"  # Replace with your proxy URL
@@ -68,6 +69,7 @@ class DeviceInventoryApp:
         self.create_tables()   
         # Set page size for pagination
         self.page_size = 100
+        self.software_page_size = 100
         self.current_page = 0
         # Continue with your application setup, such as connecting to DB and building the GUI
         self.set_window_size()
@@ -78,8 +80,9 @@ class DeviceInventoryApp:
         self.execute_query('''CREATE TABLE IF NOT EXISTS Devices (
                                 DeviceName TEXT,
                                 SerialNumber TEXT,
-                                DeviceID TEXT,
-                                User TEXT,
+                                EntraDeviceID TEXT,
+                                IntuneDeviceID TEXT,
+                                UserPrincipalName TEXT,
                                 OperatingSystem TEXT,
                                 OSVersion TEXT,
                                 ComplianceState TEXT,
@@ -93,11 +96,8 @@ class DeviceInventoryApp:
                                 UserDisplayName TEXT,
                                 JobTitle TEXT,
                                 Department TEXT,
-                                EmployeeID TEXT,
                                 City TEXT,
                                 Country TEXT,
-                                Manager TEXT,
-                                EntraLastSync TEXT,
                                 TrustType TEXT,
                                 TotalStorage TEXT,
                                 FreeStorage TEXT,
@@ -120,6 +120,13 @@ class DeviceInventoryApp:
                                 BackupTime TEXT,
                                 PRIMARY KEY (SerialNumber, DeviceName)
                               )''')
+        
+        self.execute_query('''CREATE TABLE IF NOT EXISTS Software (
+                            SoftwareName TEXT,
+                            Version TEXT,
+                            InstalledDevices INTEGER,
+                            PRIMARY KEY (SoftwareName, Version)
+                          )''')
 
         with self.db_lock:
             self.conn.commit()
@@ -177,17 +184,41 @@ class DeviceInventoryApp:
             print(f"Error during authentication or access check: {e}")
             return None, None """
         
-    def selection_window(self):       
+    def selection_window(self):
         self.selection_frame = tk.Frame(self.root, padx=20, pady=20, bg="#3E4C59")
         self.selection_frame.pack(expand=True, fill='both', padx=10, pady=10)
 
-        self.selection_label = tk.Label(self.selection_frame, text="Select Inventory Type", font=("Arial", 14, "bold"), fg="#E4E7EB", bg="#3E4C59")
+        self.selection_label = tk.Label(
+            self.selection_frame,
+            text="Select Inventory Type",
+            font=("Arial", 14, "bold"),
+            fg="#E4E7EB",
+            bg="#3E4C59"
+        )
         self.selection_label.pack(pady=10)
 
-        self.hardware_button = tk.Button(self.selection_frame, text="Hardware Inventory", command=self.start_hardware_inventory, font=("Arial", 12), bg="#4A5568", fg="#E4E7EB", activebackground="#6B7280")
+        # Hardware Inventory Button
+        self.hardware_button = tk.Button(
+            self.selection_frame,
+            text="Hardware Inventory",
+            command=self.start_hardware_inventory,
+            font=("Arial", 12),
+            bg="#4A5568",
+            fg="#E4E7EB",
+            activebackground="#6B7280"
+        )
         self.hardware_button.pack(pady=10, fill='x')
 
-        self.software_button = tk.Button(self.selection_frame, text="Software Inventory", command=self.start_software_inventory, font=("Arial", 12), bg="#4A5568", fg="#E4E7EB", activebackground="#6B7280")
+        # Software Inventory Button
+        self.software_button = tk.Button(
+            self.selection_frame,
+            text="Software Inventory",
+            command=self.start_software_inventory,  # Correctly linked
+            font=("Arial", 12),
+            bg="#4A5568",
+            fg="#E4E7EB",
+            activebackground="#6B7280"
+        )
         self.software_button.pack(pady=10, fill='x')
 
     """ def selection_window(self):
@@ -270,6 +301,285 @@ class DeviceInventoryApp:
         quit_button = tk.Button(error_frame, text="Quit", command=self.root.quit, font=("Arial", 12), bg="#4A5568", fg="#E4E7EB", activebackground="#6B7280")
         quit_button.pack(pady=20) """
 
+    def load_software_data(self):
+        """
+        Load software data from Intune API, store it in the database, and display it in the TreeView.
+        """
+        try:
+            # Step 1: Authenticate and retrieve data from Intune
+            access_token = self.get_access_token()  # Ensure this method exists to get the token
+            headers = {"Authorization": f"Bearer {access_token}"}
+            url = "https://graph.microsoft.com/v1.0/deviceManagement/detectedApps/"
+            
+            all_software_data = []
+            while url:
+                response = self.session.get(url, headers=headers, verify=False, proxies=self.PROXIES)
+                if response.status_code == 200:
+                    data = response.json()
+                    all_software_data.extend(data.get("value", []))
+                    url = data.get("@odata.nextLink")  # Check for the next page of data
+                else:
+                    raise Exception(f"Failed to fetch software data: {response.status_code}, {response.text}")
+
+            # Step 2: Process and write data into the database
+            with sqlite3.connect("inventory.db", timeout=30) as conn:
+                cursor = conn.cursor()
+
+                # Ensure the Software table exists
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS Software (
+                        SoftwareName TEXT,
+                        Version TEXT,
+                        InstalledDevices INTEGER,
+                        PRIMARY KEY (SoftwareName, Version)
+                    )
+                ''')
+
+                for app in all_software_data:
+                    software_name = app.get("displayName", "").strip()
+                    version = app.get("version", "").strip()
+                    installed_devices = app.get("deviceCount", 0)
+
+                    if software_name and version:
+                        cursor.execute('''
+                            INSERT INTO Software (SoftwareName, Version, InstalledDevices)
+                            VALUES (?, ?, ?)
+                            ON CONFLICT(SoftwareName, Version)
+                            DO UPDATE SET InstalledDevices = excluded.InstalledDevices
+                        ''', (software_name, version, installed_devices))
+
+                conn.commit()
+
+            # Step 3: Load data from the database
+            with sqlite3.connect("inventory.db", timeout=30) as conn:
+                software_data = pd.read_sql_query("SELECT * FROM Software", conn)
+
+            # Step 4: Store and display the data
+            self.software_data = software_data
+            self.filtered_software_data = software_data
+            self.current_software_page = 0
+
+            # Display the first page of data
+            self.display_software_data()
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load software data: {e}")
+
+    def next_software_page(self):
+        total_pages = (len(self.filtered_software_data) - 1) // self.software_page_size + 1
+        if self.current_software_page + 1 < total_pages:
+            self.current_software_page += 1
+            self.display_software_data()
+
+    def previous_software_page(self):
+        if self.current_software_page > 0:
+            self.current_software_page -= 1
+            self.display_software_data()
+
+    def apply_software_filter(self):
+        try:
+            # Get the search query
+            search_query = self.software_search_entry.get().strip().lower()
+
+            # Start with the full dataset
+            filtered_data = self.software_data.copy()
+
+            # Apply search query
+            if search_query:
+                filtered_data = filtered_data[
+                    filtered_data.apply(
+                        lambda row: search_query in " ".join(row.astype(str).str.lower()), axis=1
+                    )
+                ]
+
+            # Update the filtered data and display it
+            self.filtered_software_data = filtered_data
+            self.current_software_page = 0
+            self.display_software_data()
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to apply filter: {e}")
+
+    def clear_software_filter(self):
+        try:
+            # Clear search entry
+            self.software_search_entry.delete(0, tk.END)
+
+            # Reset the filtered data and display it
+            self.filtered_software_data = self.software_data
+            self.current_software_page = 0
+            self.display_software_data()
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to clear filters: {e}")
+
+    def export_software_view(self):
+        """
+        Export the filtered software view to an Excel file.
+        """
+        try:
+            # Prompt the user to select a save location
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".xlsx",
+                filetypes=[("Excel files", "*.xlsx")],
+                title="Export Software View",
+            )
+            if file_path:
+                # Export the filtered data to an Excel file
+                self.filtered_software_data.to_excel(file_path, index=False)
+                messagebox.showinfo("Success", "Software view exported successfully.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to export software view: {e}")
+
+    def export_software_database(self):
+        """
+        Export the entire software database to an Excel file.
+        """
+        try:
+            # Prompt the user to select a save location
+            file_path = filedialog.asksaveasfilename(
+                defaultextension=".xlsx",
+                filetypes=[("Excel files", "*.xlsx")],
+                title="Export Software Database",
+            )
+            if file_path:
+                # Fetch the entire Software table from the database
+                with sqlite3.connect('inventory.db', timeout=30) as conn:
+                    software_data = pd.read_sql_query("SELECT * FROM Software", conn)
+
+                # Export the data to an Excel file
+                software_data.to_excel(file_path, index=False)
+                messagebox.showinfo("Success", "Software database exported successfully.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to export software database: {e}")
+
+    def display_software_data(self):
+        """
+        Display the software data in the TreeView for the current page.
+        """
+        try:
+            # Clear the existing rows in the TreeView
+            for item in self.software_tree.get_children():
+                self.software_tree.delete(item)
+
+            # Determine the range of rows to display for the current page
+            start_idx = self.current_software_page * self.software_page_size
+            end_idx = start_idx + self.software_page_size
+            current_page_data = self.filtered_software_data.iloc[start_idx:end_idx]
+
+            # Populate the TreeView with the current page of data
+            for _, row in current_page_data.iterrows():
+                self.software_tree.insert("", "end", values=(row["SoftwareName"], row["Version"], row["InstalledDevices"]))
+
+            # Update the pagination label
+            total_pages = (len(self.filtered_software_data) - 1) // self.software_page_size + 1
+            self.softwarepage_number_label.config(text=f"Page {self.current_software_page + 1} / {total_pages}")
+
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to display software data: {e}")
+    
+    def clear_software_search(self):
+        """
+        Clear the search entry and reload the full software data.
+        """
+        self.software_search_entry.delete(0, tk.END)  # Clear the search entry field
+        self.filtered_software_data = self.software_data.copy()  # Reset filtered data to full data
+        self.current_software_page = 0  # Reset pagination
+        self.display_software_data()  # Refresh the Treeview with full data
+
+    def refresh_software_data(self):
+        """
+        Refresh the software data by reloading it from the database and API.
+        """
+        try:
+            # Refresh software data from the database or API
+            self.load_software_data()
+
+            # Reset filters and pagination
+            self.clear_software_filter()
+            self.current_software_page = 0
+
+            # Display the updated software data
+            self.display_software_data()
+
+            messagebox.showinfo("Success", "Software data refreshed successfully.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to refresh software data: {e}")
+    
+    def start_software_inventory(self):
+        # Create a new window for the progress bar
+        progress_window = tk.Toplevel(self.root)
+        progress_window.title("Starting Software Inventory")
+        progress_window.geometry("300x100")
+        progress_window.transient(self.root)
+        progress_window.grab_set()  # Make the main window unresponsive
+
+        # Center the progress window on the screen
+        progress_window.update_idletasks()
+        x = (progress_window.winfo_screenwidth() // 2) - (progress_window.winfo_width() // 2)
+        y = (progress_window.winfo_screenheight() // 2) - (progress_window.winfo_height() // 2)
+        progress_window.geometry(f"+{x}+{y}")
+
+        # Add a progress bar widget
+        progress = ttk.Progressbar(progress_window, orient="horizontal", length=250, mode="indeterminate")
+        progress.pack(pady=20)
+        progress.start()
+
+        # Run the hardware inventory in a separate thread to keep the UI responsive
+        threading.Thread(target=self.run_software_inventory, args=(progress_window, progress)).start()
+
+    def run_software_inventory(self, progress_window, progress):
+        try:
+            # Step 1: Authenticate to Microsoft Graph to retrieve Intune data
+            access_token = self.get_access_token()
+            
+            # Step 2: Retrieve Intune apps information
+            intune_apps = self.retrieve_intune_software(access_token)
+
+            # Step 3: Export the retrieved app information to the database
+            self.export_apps_to_database(intune_apps)
+        except Exception as e:
+            print(f"Failed to run software inventory: {e}\n{traceback.format_exc()}")
+        finally:
+            # Stop and close the progress window
+            progress.stop()
+            progress_window.destroy()
+
+        # Destroy the selection frame and load the main app
+        self.selection_frame.destroy()
+        self.main_app("software")
+
+    def retrieve_intune_software(self, access_token):
+        url = "https://graph.microsoft.com/v1.0/deviceManagement/detectedApps/"
+        
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Content-Type': 'application/json'
+        }
+        response = requests.get(url, headers=headers, verify=False, proxies=self.PROXIES)
+        if response.status_code == 200:
+            apps = response.json().get('value', [])            
+            return apps
+        else:
+            raise Exception(f"Failed to retrieve software information. Status code: {response.status_code}, Response: {response.text}")
+        
+    def export_apps_to_database(self, apps):
+        # Prepare a list of selected app data for saving to Excel
+        selected_apps = []
+        for app in apps:
+            app_data = {
+                'SoftwareName': app.get('displayName', ''),
+                'Version': app.get('version', ''),
+                'InstalledDevices': app.get('deviceCount', '')
+            }
+
+            # Add a check to skip empty or nearly-empty records
+            if not any(app_data.values()):
+                print("Skipping empty app record:", app_data)
+                continue
+            
+            selected_apps.append(app_data)
+
     def start_hardware_inventory(self):
         # Create a new window for the progress bar
         progress_window = tk.Toplevel(self.root)
@@ -294,14 +604,8 @@ class DeviceInventoryApp:
 
     def run_hardware_inventory(self, progress_window, progress):
         try:
-            # Step 1: Authenticate to Microsoft Graph to retrieve Intune data
-            access_token = self.get_access_token()
-            
-            # Step 2: Retrieve Intune device information
-            intune_devices = self.retrieve_intune_devices(access_token)
-
-            # Step 3: Export the retrieved device information to the database
-            self.export_to_database(intune_devices)
+            #Export the retrieved device information to the database
+            self.export_to_database()
         except Exception as e:
             print(f"Failed to run hardware inventory: {e}\n{traceback.format_exc()}")
         finally:
@@ -312,9 +616,6 @@ class DeviceInventoryApp:
         # Destroy the selection frame and load the main app
         self.selection_frame.destroy()
         self.main_app("hardware")
-
-    def start_software_inventory(self):
-        pass
 
     def return_to_main_screen(self):
         # Destroy the main app frame and return to the selection window
@@ -452,7 +753,10 @@ class DeviceInventoryApp:
                 devices_data['Remarks'] = ""
 
             # Combine data from Devices table and Excel data
-            combined_data = pd.concat([devices_data, excel_data], ignore_index=True)
+            if not devices_data.empty and not excel_data.empty:
+                combined_data = pd.concat([devices_data, excel_data], ignore_index=True)
+            else:
+                combined_data = devices_data if not devices_data.empty else excel_data
 
             # Remove duplicates based on DeviceName and SerialNumber, keeping the latest ReportTime
             combined_data['ReportTime'] = pd.to_datetime(combined_data['ReportTime'], format="%Y-%m-%d %H:%M:%S", errors='coerce')
@@ -526,26 +830,27 @@ class DeviceInventoryApp:
 
                         # Update the existing record
                         cursor.execute('''UPDATE Devices SET 
-                                        User = ?, OperatingSystem = ?, DeviceID = ?, OSVersion = ?, ComplianceState = ?, Source = ?,
+                                        UserPrincipalName = ?, OperatingSystem = ?, EntraDeviceID = ?, IntuneDeviceID = ?, OSVersion = ?, ComplianceState = ?, Source = ?,
                                         Model = ?, Manufacturer = ?, MAC = ?, IntuneLastSync = ?, ReportTime = ?, Encryption = ?,
-                                        UserDisplayName = ?, JobTitle = ?, Department = ?, EmployeeID = ?, City = ?, Country = ?, Manager = ?,
-                                        EntraLastSync = ?, TrustType = ?, TotalStorage = ?, FreeStorage = ?, PhysicalMemory = ?
+                                        UserDisplayName = ?, JobTitle = ?, Department = ?, City = ?, Country = ?,
+                                        TrustType = ?, TotalStorage = ?, FreeStorage = ?, PhysicalMemory = ?
                                         WHERE DeviceName = ? AND SerialNumber = ?''',
-                                    (row['User'], row['OperatingSystem'], row['DeviceID'], row['OSVersion'], row['ComplianceState'], source_value,
+                                    (row['UserPrincipalName'], row['OperatingSystem'], row['EntraDeviceID'], row['IntuneDeviceID'], row['OSVersion'], row['ComplianceState'], source_value,
                                     row['Model'], row['Manufacturer'], row['MAC'], row['IntuneLastSync'], report_time_str, row['Encryption'],
-                                    row['UserDisplayName'], row['JobTitle'], row['Department'], row['EmployeeID'], row['City'], row['Country'], row['Manager'],
-                                    row['EntraLastSync'], row['TrustType'], row['TotalStorage'], row['FreeStorage'], row['PhysicalMemory'],
+                                    row['UserDisplayName'], row['JobTitle'], row['Department'], row['City'], row['Country'],
+                                    row['TrustType'], row['TotalStorage'], row['FreeStorage'], row['PhysicalMemory'],
                                     row['DeviceName'], row['SerialNumber']))
                     else:
                         # Insert a new record
-                        cursor.execute('''INSERT INTO Devices (DeviceName, SerialNumber, User, DeviceID, OperatingSystem, OSVersion, Source, ComplianceState, 
-                                       Model, Manufacturer, MAC, IntuneLastSync, ReportTime, Encryption, UserDisplayName, JobTitle, Department, EmployeeID, City, Country, Manager,
-                                       EntraLastSync, TrustType, TotalStorage, FreeStorage, PhysicalMemory)
-                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                                    (row['DeviceName'], row['SerialNumber'], row['User'], row['DeviceID'], row['OperatingSystem'], row['OSVersion'], 'Cloud',
-                                    row['ComplianceState'], row['Model'], row['Manufacturer'], row['MAC'], row['IntuneLastSync'], report_time_str, row['Encryption'],
-                                    row['UserDisplayName'], row['JobTitle'], row['Department'], row['EmployeeID'], row['City'], row['Country'], row['Manager'],
-                                    row['EntraLastSync'], row['TrustType'], row['TotalStorage'], row['FreeStorage'], row['PhysicalMemory']))
+                        cursor.execute('''INSERT INTO Devices (DeviceName, SerialNumber, UserPrincipalName, EntraDeviceID, IntuneDeviceID, OperatingSystem, OSVersion, Source, ComplianceState, 
+                                       Model, Manufacturer, MAC, IntuneLastSync, ReportTime, Encryption, UserDisplayName, JobTitle, Department, City, Country,
+                                       TrustType, TotalStorage, FreeStorage, PhysicalMemory)
+                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                                    (row['DeviceName'], row['SerialNumber'], row['UserPrincipalName'], row['EntraDeviceID'], row['IntuneDeviceID'], 
+                                    row['OperatingSystem'], row['OSVersion'], 'Cloud', row['ComplianceState'], row['Model'], 
+                                    row['Manufacturer'], row['MAC'], row['IntuneLastSync'], report_time_str, row['Encryption'], row['UserDisplayName'], 
+                                    row['JobTitle'], row['Department'], row['City'], row['Country'],
+                                    row['TrustType'], row['TotalStorage'], row['FreeStorage'], row['PhysicalMemory']))
 
                 conn.commit()
 
@@ -586,7 +891,10 @@ class DeviceInventoryApp:
                 devices_data['Remarks'] = ""
 
             # Combine data from Devices table and Excel data
-            combined_data = pd.concat([devices_data, excel_data], ignore_index=True)
+            if not devices_data.empty and not excel_data.empty:
+                combined_data = pd.concat([devices_data, excel_data], ignore_index=True)
+            else:
+                combined_data = devices_data if not devices_data.empty else excel_data
 
             # Remove duplicates based on DeviceName and SerialNumber, keeping the latest ReportTime
             combined_data['ReportTime'] = pd.to_datetime(combined_data['ReportTime'], format="%Y-%m-%d %H:%M:%S", errors='coerce')
@@ -660,26 +968,27 @@ class DeviceInventoryApp:
 
                         # Update the existing record
                         cursor.execute('''UPDATE Devices SET 
-                                        User = ?, OperatingSystem = ?, DeviceID = ?, OSVersion = ?, ComplianceState = ?, Source = ?,
+                                        UserPrincipalName = ?, OperatingSystem = ?, EntraDeviceID = ?, IntuneDeviceID = ?, OSVersion = ?, ComplianceState = ?, Source = ?,
                                         Model = ?, Manufacturer = ?, MAC = ?, IntuneLastSync = ?, ReportTime = ?, Encryption = ?,
-                                        UserDisplayName = ?, JobTitle = ?, Department = ?, EmployeeID = ?, City = ?, Country = ?, Manager = ?,
-                                        EntraLastSync = ?, TrustType = ?, TotalStorage = ?, FreeStorage = ?, PhysicalMemory = ?
+                                        UserDisplayName = ?, JobTitle = ?, Department = ?, City = ?, Country = ?,
+                                        TrustType = ?, TotalStorage = ?, FreeStorage = ?, PhysicalMemory = ?
                                         WHERE DeviceName = ? AND SerialNumber = ?''',
-                                    (row['User'], row['OperatingSystem'], row['DeviceID'], row['OSVersion'], row['ComplianceState'], source_value,
+                                    (row['UserPrincipalName'], row['OperatingSystem'], row['EntraDeviceID'], row['IntuneDeviceID'], row['OSVersion'], row['ComplianceState'], source_value,
                                     row['Model'], row['Manufacturer'], row['MAC'], row['IntuneLastSync'], report_time_str, row['Encryption'],
-                                    row['UserDisplayName'], row['JobTitle'], row['Department'], row['EmployeeID'], row['City'], row['Country'], row['Manager'],
-                                    row['EntraLastSync'], row['TrustType'], row['TotalStorage'], row['FreeStorage'], row['PhysicalMemory'],
+                                    row['UserDisplayName'], row['JobTitle'], row['Department'], row['City'], row['Country'],
+                                    row['TrustType'], row['TotalStorage'], row['FreeStorage'], row['PhysicalMemory'],
                                     row['DeviceName'], row['SerialNumber']))
                     else:
                         # Insert a new record
-                        cursor.execute('''INSERT INTO Devices (DeviceName, SerialNumber, User, DeviceID, OperatingSystem, OSVersion, Source, ComplianceState, Model, 
-                                       Manufacturer, MAC, IntuneLastSync, ReportTime, Encryption, UserDisplayName, JobTitle, Department, EmployeeID, City, Country, Manager,
-                                       EntraLastSync, TrustType, TotalStorage, FreeStorage)
-                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                                    (row['DeviceName'], row['SerialNumber'], row['User'], row['DeviceID'], row['OperatingSystem'], row['OSVersion'], 'Cloud',
-                                    row['ComplianceState'], row['Model'], row['Manufacturer'], row['MAC'], row['IntuneLastSync'], report_time_str, row['Encryption'],
-                                    row['UserDisplayName'], row['JobTitle'], row['Department'], row['EmployeeID'], row['City'], row['Country'], row['Manager'],
-                                    row['EntraLastSync'], row['TrustType'], row['TotalStorage'], row['FreeStorage'], row['PhysicalMemory']))
+                        cursor.execute('''INSERT INTO Devices (DeviceName, SerialNumber, UserPrincipalName, EntraDeviceID, IntuneDeviceID, OperatingSystem, OSVersion, Source, ComplianceState, 
+                                       Model, Manufacturer, MAC, IntuneLastSync, ReportTime, Encryption, UserDisplayName, JobTitle, Department, City, Country,
+                                       TrustType, TotalStorage, FreeStorage, PhysicalMemory)
+                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                                    (row['DeviceName'], row['SerialNumber'], row['UserPrincipalName'], row['EntraDeviceID'], row['IntuneDeviceID'], 
+                                    row['OperatingSystem'], row['OSVersion'], 'Cloud', row['ComplianceState'], row['Model'], 
+                                    row['Manufacturer'], row['MAC'], row['IntuneLastSync'], report_time_str, row['Encryption'], row['UserDisplayName'], 
+                                    row['JobTitle'], row['Department'], row['City'], row['Country'],
+                                    row['TrustType'], row['TotalStorage'], row['FreeStorage'], row['PhysicalMemory']))
 
                 conn.commit()
 
@@ -728,7 +1037,7 @@ class DeviceInventoryApp:
                     self.retrieve_user_details(access_token, user_principal_name, device)
                 if device_id:
                     self.retrieve_entra_devices(access_token, device_id, device)
-                    self.retrieve_device_memory(access_token, intune_device_id, device)
+                    #self.retrieve_device_memory(access_token, intune_device_id, device)
             return devices
         else:
             raise Exception(f"Failed to retrieve device information. Status code: {response.status_code}, Response: {response.text}")
@@ -748,11 +1057,9 @@ class DeviceInventoryApp:
                 device_list = entra_info_response.json().get('value', [])  # Extract 'value' as a list
                 if device_list:  # Ensure the list is not empty
                     first_device = device_list[0]  # Extract the first device from the list
-                    entra_last_sync = first_device.get('createdDateTime', 'N/A')
                     trust_type = first_device.get('trustType', 'N/A')
 
                     # Update device dictionary
-                    device['entraLastSync'] = entra_last_sync
                     device['trustType'] = trust_type
                 else:
                     print(f"No Entra device found for DeviceID: {deviceId}")
@@ -761,33 +1068,65 @@ class DeviceInventoryApp:
         except Exception as e:
             print(f"Exception occurred while retrieving Entra device details: {str(e)}")
 
-    def retrieve_device_memory(self, access_token, deviceId, device):
-        # Get user details
-        memory_info_url = f"https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/{deviceId}?$select=physicalMemoryInBytes"
-        headers = {
-            'Authorization': f'Bearer {access_token}',
-            'Content-Type': 'application/json'
-        }
-
-        try:
-            # Request user details (excluding the manager field initially)
-            memory_info_response = requests.get(memory_info_url, headers=headers, verify=False, proxies=self.PROXIES)
-            if memory_info_response.status_code == 200:
-                memory_details = memory_info_response.json()
-
-                # Add default values for missing fields
-                physical_Memory = memory_details.get('physicalMemoryInBytes', 'N/A')
-
-                # Add manager display name to user details
-                memory_details['physical_Memory'] = physical_Memory
-
-                # Attach user details to the device
-                device.update(memory_details)
+    # To be implemented
+    def refresh_device_info(self):
+        selected_item = self.tree.selection()
+        if selected_item:
+            item_values = self.tree.item(selected_item, "values")
+            # Create a mapping of column names to their index positions
+            columns_mapping = {col: idx for idx, col in enumerate(self.tree["columns"])}
+            device_name = str(item_values[columns_mapping["DeviceName"]])  
+            serial_number = str(item_values[columns_mapping["SerialNumber"]])  
+            
+            # Retrieve DeviceID from the database
+            self.cursor.execute("SELECT EntraDeviceID FROM Devices WHERE DeviceName = ? AND SerialNumber = ?", (device_name, serial_number))
+            result = self.cursor.fetchone()
+            if result:
+                deviceId = result[0]
             else:
-                print(f"Failed to retrieve memory details for {deviceId}. Status code: {memory_info_response.status_code}, Response: {memory_info_response.text}")
+                messagebox.showerror("Error", "Device ID not found for the selected device.")
+                return
+            
+        # Get memory details        
+        try:
+            # Retrieve all BitLocker recovery keys from Microsoft Graph API
+            access_token = self.get_access_token()
+            headers = {
+                'Authorization': f'Bearer {access_token}',
+                'Content-Type': 'application/json'
+            }
+            memory_info_url = f"https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/{deviceId}?$select=physicalMemoryInBytes"
+            memory_info_response = requests.get(memory_info_url, headers=headers, verify=False, proxies=self.PROXIES)
+
+            if memory_info_response.status_code == 200:
+                physical_memory = memory_info_response.json().get('physicalMemoryInBytes', 'N/A')
+
+                if physical_memory:
+                    # Update or insert the remark in the database using the correct Serial Number and Device Name
+                    self.cursor.execute("REPLACE INTO Memory (SerialNumber, DeviceName, PhysicalMemory) VALUES (?, ?, ?)",
+                                        (serial_number, device_name, physical_memory))
+                    self.conn.commit()
+
+                    # Update the remark in both self.data and self.filtered_data DataFrames to keep them consistent
+                    self.data.loc[(self.data['SerialNumber'].str.strip().str.lower() == serial_number) &
+                                (self.data['DeviceName'].str.strip().str.lower() == device_name), 'PhysicalMemory'] = physical_memory
+
+                    # Update the database with the modified Source value
+                    self.conn.commit()
+
+                    # Update filtered data directly if the item is present
+                    if not self.filtered_data.empty:
+                        self.filtered_data.loc[(self.filtered_data['SerialNumber'].str.strip().str.lower() == serial_number) &
+                                            (self.filtered_data['DeviceName'].str.strip().str.lower() == device_name), 'PhysicalMemory'] = physical_memory
+
+                    # Refresh the displayed data to reflect the changes
+                    self.display_data(self.filtered_data)
+                    self.update_total_records(self.filtered_data)
+            else:
+                messagebox.showerror("Error", f"Failed to retrieve memory details for {deviceId}. Status code: {memory_info_response.status_code}, Response: {memory_info_response.text}")
 
         except Exception as e:
-            print(f"Exception occurred while retrieving memory details: {str(e)}")
+            messagebox.showerror("Error", f"Exception occurred while retrieving memory details: {str(e)}")
 
     def retrieve_user_details(self, access_token, user_principal_name, device):
         # Get user details
@@ -829,51 +1168,128 @@ class DeviceInventoryApp:
         except Exception as e:
             print(f"Exception occurred while retrieving user details: {str(e)}")
         
-    def export_to_database(self, devices):
-        # Prepare a list of selected device data for saving to Excel
-        selected_devices = []
-        for device in devices:
+    def export_to_database(self):
+        # File names
+        intune_file = "IntuneDeviceReport.xlsx"
+        entra_file = "EntraDeviceReport.xlsx"
+        user_file = "UserReport.xlsx"
+
+        # Check if all files exist
+        if not all(os.path.exists(file) for file in [intune_file, entra_file, user_file]):
+            raise FileNotFoundError("One or more required files are missing.")
+
+        # Load the reports into DataFrames
+        intune_df = pd.read_excel(intune_file).fillna("")
+        entra_df = pd.read_excel(entra_file).fillna("")
+        user_df = pd.read_excel(user_file).fillna("")
+
+        # Ensure proper column naming for consistency
+        intune_columns = [
+            "DeviceName", "UserPrincipalName", "EntraDeviceID", "IntuneDeviceID", "OperatingSystem", "OSVersion", 
+            "ComplianceState", "Model", "Manufacturer", "SerialNumber", "MAC", "IntuneLastSync", "Encryption", 
+            "TotalStorage", "FreeStorage", 'PhysicalMemory', "Source", "Remarks"
+        ]
+        entra_columns = ["DeviceName", "EntraDeviceID", "TrustType"]
+        user_columns = ["UPN", "UserDisplayName", "JobTitle", "Department", "City", "Country"]
+
+        intune_df.columns = intune_columns
+        entra_df.columns = entra_columns
+        user_df.columns = user_columns
+
+        # Merge data
+        merged_df = intune_df.merge(entra_df, on=["DeviceName", "EntraDeviceID"], how="left")
+        merged_df = merged_df.merge(user_df, left_on="UserPrincipalName", right_on="UPN", how="left")
+
+        # Prepare data for the Devices table
+        devices_data = []
+        for _, row in merged_df.iterrows():
+            # Check if UserPrincipalName is empty
+            if not row['UserPrincipalName']:
+                user_display_name = ""
+                job_title = ""
+                department = ""
+                city = ""
+                country = ""
+            else:
+                user_display_name = row['UserDisplayName']
+                job_title = row['JobTitle']
+                department = row['Department']
+                city = row['City']
+                country = row['Country']
+            # Convert TotalStorage, FreeStorage, and PhysicalMemory from bytes to GB
+            total_storage = row['TotalStorage']
+            free_storage = row['FreeStorage']
+            #physical_memory = row['PhysicalMemory']
+
+            # Convert to GB and round to the nearest integer if the value is not 'N/A'
+            total_storage_gb = int(round(total_storage / (1024 ** 3))) if isinstance(total_storage, (int, float)) and total_storage != '' else ''
+            free_storage_gb = int(round(free_storage / (1024 ** 3))) if isinstance(free_storage, (int, float)) and free_storage != '' else ''
+            #physical_memory_gb = int(round(physical_memory / (1024 ** 3))) if isinstance(physical_memory, (int, float)) and physical_memory != '' else ''
             device_data = {
-                'DeviceName': device.get('deviceName', ''),
-                'SerialNumber': device.get('serialNumber', ''),
-                'DeviceID': device.get('azureADDeviceId', ''),
-                'User': device.get('userPrincipalName', ''),
-                'OperatingSystem': device.get('operatingSystem', ''),
-                'OSVersion': device.get('osVersion', ''),
-                'ComplianceState': device.get('complianceState', ''),
-                'Model': device.get('model', ''),
-                'Manufacturer': device.get('manufacturer', ''),
-                'MAC': device.get('wiFiMacAddress', ''),
-                'IntuneLastSync': device.get('lastSyncDateTime', ''),
-                'EntraLastSync': device.get('entraLastSync', ''),
+                'DeviceName': str(row['DeviceName']),
+                'SerialNumber': str(row['SerialNumber']),
+                'EntraDeviceID': str(row['EntraDeviceID']),
+                'IntuneDeviceID': str(row['IntuneDeviceID']),
+                'UserPrincipalName': str(row['UserPrincipalName']),
+                'OperatingSystem': str(row['OperatingSystem']),
+                'OSVersion': str(row['OSVersion']),
+                'ComplianceState': str(row['ComplianceState']),
+                'Model': str(row['Model']),
+                'Manufacturer': str(row['Manufacturer']),
+                'MAC': str(row['MAC']),
+                'IntuneLastSync': str(row['IntuneLastSync']),
                 'ReportTime': time.strftime("%Y-%m-%d %H:%M:%S"),
-                'Source': 'Cloud',
-                'Encryption': str(device.get('isEncrypted', '')),
-                'UserDisplayName': device.get('displayName', ''),
-                'JobTitle': device.get('jobTitle', 'N/A'),
-                'Department': device.get('department', 'N/A'),
-                'EmployeeID': device.get('employeeId', 'N/A'),
-                'City': device.get('city', 'N/A'),
-                'Country': device.get('country', 'N/A'),
-                'Manager': device.get('manager_displayName', ''),
-                'TotalStorage': device.get('totalStorageSpaceInBytes', 'N/A'),
-                'FreeStorage': device.get('freeStorageSpaceInBytes', 'N/A'),
-                'PhysicalMemory': device.get('physicalMemoryInBytes', 'N/A'),
-                'TrustType': device.get('trustType', '')
+                'Source': str(row['Source']),
+                'Encryption': str(row['Encryption']),
+                'UserDisplayName': user_display_name,
+                'JobTitle': job_title,
+                'Department': department,
+                'City': city,
+                'Country': country,
+                'TrustType': str(row['TrustType']),
+                'TotalStorage': total_storage_gb,
+                'FreeStorage': free_storage_gb,
+                'PhysicalMemory': str(row['PhysicalMemory']),
+                'Remarks': str(row['Remarks'])
             }
 
-            # Add a check to skip empty or nearly-empty records
+            # Skip empty records
             if not any(device_data.values()):
-                print("Skipping empty device record:", device_data)
                 continue
-            
-            selected_devices.append(device_data)
+
+            devices_data.append(device_data)
 
         # Convert the selected device data to a DataFrame and save as an Excel file
-        if selected_devices:
-            df = pd.DataFrame(selected_devices)
+        if devices_data:
+            df = pd.DataFrame(devices_data)
             df.fillna('', inplace=True)
             df.to_excel('DeviceInventory.xlsx', index=False)
+
+            # Write the data to the SQLite database
+            with sqlite3.connect('inventory.db', timeout=30) as conn:
+                cursor = conn.cursor()
+
+                for _, row in df.iterrows():
+                    # Convert ReportTime to string or None (if it's NaT)
+                    report_time_str = row['ReportTime']
+                    if pd.isna(report_time_str):
+                        report_time_str = None
+                    elif isinstance(report_time_str, pd.Timestamp):
+                        report_time_str = report_time_str.strftime("%Y-%m-%d %H:%M:%S")
+
+                    # Insert or update the record in the database
+                    cursor.execute('''REPLACE INTO Devices (DeviceName, SerialNumber, UserPrincipalName, EntraDeviceID, IntuneDeviceID, OperatingSystem, 
+                                        OSVersion, Source, ComplianceState, 
+                                       Model, Manufacturer, MAC, IntuneLastSync, ReportTime, Encryption, UserDisplayName, JobTitle, Department, City, Country,
+                                       TrustType, TotalStorage, FreeStorage, PhysicalMemory)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                                    (row['DeviceName'], row['SerialNumber'], row['UserPrincipalName'], row['EntraDeviceID'], row['IntuneDeviceID'], 
+                                    row['OperatingSystem'], row['OSVersion'], 'Cloud', row['ComplianceState'], row['Model'], 
+                                    row['Manufacturer'], row['MAC'], row['IntuneLastSync'], report_time_str, row['Encryption'], row['UserDisplayName'], 
+                                    row['JobTitle'], row['Department'], row['City'], row['Country'],
+                                    row['TrustType'], row['TotalStorage'], row['FreeStorage'], row['PhysicalMemory']))
+
+                conn.commit()
         else:
             print("No valid devices found to export to Excel.")
 
@@ -887,7 +1303,7 @@ class DeviceInventoryApp:
             serial_number = str(item_values[columns_mapping["SerialNumber"]])  
             
             # Retrieve DeviceID from the database
-            self.cursor.execute("SELECT DeviceID FROM Devices WHERE DeviceName = ? AND SerialNumber = ?", (device_name, serial_number))
+            self.cursor.execute("SELECT EntraDeviceID FROM Devices WHERE DeviceName = ? AND SerialNumber = ?", (device_name, serial_number))
             result = self.cursor.fetchone()
             if result:
                 device_id = result[0]
@@ -1036,7 +1452,7 @@ class DeviceInventoryApp:
                 # Retrieve the headers from the Devices table
                 columns = [
                     'DeviceName', 'SerialNumber', 'OperatingSystem', 'OSVersion', 'Manufacturer', 'Model', 'TotalStorage', 
-                    'PhysicalMemory', 'UserDisplayName', 'Department', 'Country', 'City'
+                    'PhysicalMemory', 'UserPrincipalName', 'UserDisplayName', 'Department', 'Country', 'City'
                 ]
                 # Create an empty DataFrame with the column headers
                 df = pd.DataFrame(columns=columns)
@@ -1057,7 +1473,7 @@ class DeviceInventoryApp:
                 # Check for illegal columns
                 expected_columns = [
                     'DeviceName', 'SerialNumber', 'OperatingSystem', 'OSVersion', 'Manufacturer', 'Model', 'TotalStorage', 
-                    'PhysicalMemory', 'UserDisplayName', 'Department', 'Country', 'City'
+                    'PhysicalMemory', 'UserPrincipalName', 'UserDisplayName', 'Department', 'Country', 'City'
                 ]
                 illegal_columns = [col for col in new_data.columns if col not in expected_columns]
                 if illegal_columns:
@@ -1072,229 +1488,388 @@ class DeviceInventoryApp:
 
                 new_data.dropna(subset=['DeviceName', 'SerialNumber'], how='all', inplace=True)
 
+                # Automatically add the current timestamp for ReportTime
+                current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+                new_data["ReportTime"] = current_time
+
                 # Insert data into Devices table
                 with sqlite3.connect('inventory.db', timeout=30) as conn:
                     cursor = conn.cursor()
 
-                    for _, row in new_data.iterrows():
-                        # Convert ReportTime to string (if it's a Timestamp, otherwise leave as is)
-                        report_time_str = None
-                        if isinstance(report_time_str, pd.Timestamp):
-                            report_time_str = report_time_str.strftime("%Y-%m-%d %H:%M:%S")
-                        
+                    for _, row in new_data.iterrows():                                               
                         # Insert or replace the record into Devices table
                         cursor.execute('''REPLACE INTO Devices (DeviceName, SerialNumber, ReportTime, 'OperatingSystem', 'OSVersion', 
                                        'Manufacturer', 'Model', 'TotalStorage', 
-                                        'PhysicalMemory', 'UserDisplayName', 'Department', 'Country', 'City')
-                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                                        (row['DeviceName'], row['SerialNumber'], report_time_str, row['OperatingSystem'], row['OSVersion'],
-                                         row['Manufacturer'], row['Model'], row['TotalStorage'], row['PhysicalMemory'],
+                                        'PhysicalMemory', 'UserPrincipalName', 'UserDisplayName', 'Department', 'Country', 'City')
+                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                                        (row['DeviceName'], row['SerialNumber'], row['ReportTime'], row['OperatingSystem'], row['OSVersion'],
+                                         row['Manufacturer'], row['Model'], row['TotalStorage'], row['PhysicalMemory'], row['UserPrincipalName'],
                                          row['UserDisplayName'], row['Department'], row['Country'], row['City']))
+                        
+                        if not pd.isna(row['PhysicalMemory']) and not row['PhysicalMemory'] == "":
+                            cursor.execute('''REPLACE INTO Memory (DeviceName, SerialNumber, 'PhysicalMemory')
+                                            VALUES (?, ?, ?)''',
+                                            (row['DeviceName'], row['SerialNumber'], row['PhysicalMemory']))
+
                     conn.commit()
-                messagebox.showinfo("Success", "Data uploaded successfully.")
+                messagebox.showinfo("Success", "Data uploaded successfully.") 
                 self.load_data()
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to upload data: {e}")
 
     def main_app(self, inventory_type):
-        # Create a menu bar
-        self.menubar = tk.Menu(self.root, bg="#1F2933", fg="#E4E7EB")
-        self.root.config(menu=self.menubar)
+        if inventory_type == 'software':
+            # Create a menu bar
+            self.menubar = tk.Menu(self.root, bg="#1F2933", fg="#E4E7EB")
+            self.root.config(menu=self.menubar)
 
-        # Create File menu
-        self.file_menu = tk.Menu(self.menubar, tearoff=0)
-        self.menubar.add_cascade(label="File", menu=self.file_menu)
-                
-        self.file_menu.add_command(label="Refresh Data", command=self.refresh_data)
-        self.file_menu.add_command(label="Exit", command=self.root.quit)
+            # Create File menu
+            self.file_menu = tk.Menu(self.menubar, tearoff=0)
+            self.menubar.add_cascade(label="File", menu=self.file_menu)
+                    
+            self.file_menu.add_command(label="Refresh Data", command=self.refresh_software_data)
+            self.file_menu.add_command(label="Exit", command=self.root.quit)
 
-        # Create View menu
-        self.view_menu = tk.Menu(self.menubar, tearoff=0)
-        self.menubar.add_cascade(label="View", menu=self.view_menu)
+            # Create Data menu
+            self.data_menu = tk.Menu(self.menubar, tearoff=0)
+            self.menubar.add_cascade(label="Data", menu=self.data_menu)
+            
+            # Create Export sub-menu
+            self.export_menu = tk.Menu(self.data_menu, tearoff=0)
+            self.data_menu.add_cascade(label="Export", menu=self.export_menu)
+            self.export_menu.add_command(label="Export View", command=self.export_software_view)
+            self.export_menu.add_command(label="Export Database", command=self.export_software_database)
 
-        # Create Columns sub-menu under View menu
-        self.columns_menu = tk.Menu(self.view_menu, tearoff=0)
-        self.view_menu.add_cascade(label="Columns", menu=self.columns_menu)
+            # Add Return option at the end of the menu
+            self.menubar.add_command(label="Return", command=self.confirm_return)
 
-        # Get columns from Devices table and add as sub-options under Columns (excluding certain columns)
-        self.columns_to_exclude = ["DeviceName", "SerialNumber", "OperatingSystem", "IntuneLastSync", "Source", "Remarks"]
-        with sqlite3.connect('inventory.db', timeout=30) as conn:
-            cursor = conn.cursor()
-            cursor.execute("PRAGMA table_info(Devices)")
-            columns = [info[1] for info in cursor.fetchall() if info[1] not in self.columns_to_exclude]
+            # Set default padding and window resizing behavior
+            self.root.configure(padx=10, pady=10, bg="#323F4B")
+            self.root.columnconfigure(0, weight=1)
+            self.root.rowconfigure(1, weight=1)
 
-        for column in columns:
-            self.columns_menu.add_checkbutton(label=column, command=lambda col=column: self.toggle_column(col), onvalue=True, offvalue=False)
+            self.search_filter_frame = tk.Frame(self.root, padx=10, pady=5, bg="#3E4C59")
+            self.search_filter_frame.pack(fill='x', pady=5)
+            
+            # Split the filter panel into two halves
+            self.left_panel = tk.Frame(self.search_filter_frame, bg="#3E4C59")
+            self.left_panel.grid(row=0, column=0, sticky="nsew")
+            
+            self.right_panel = tk.Frame(self.search_filter_frame, bg="#3E4C59")
+            self.right_panel.grid(row=0, column=1, sticky="nsew")
+            
+            self.search_filter_frame.columnconfigure(0, weight=3)
+            self.search_filter_frame.columnconfigure(1, weight=1)
 
-        # Initialize selected columns
-        self.selected_columns = self.columns_to_exclude.copy()
+            # Updated the total records label to ensure the position remains fixed
+            self.total_records_panel = tk.Frame(self.left_panel, bg="#3E4C59")
+            self.total_records_panel.grid(row=0, column=4, columnspan=2, sticky="nsew")
+            self.total_records_label = tk.Label(self.total_records_panel, text="Records Displayed:", font=("Arial", 9, "bold"), fg="#E4E7EB", bg="#3E4C59", anchor="c")
+            self.total_records_displayed_label = tk.Label(self.total_records_panel, text="000000", font=("Arial", 9, "bold"), fg="#66CDAA", bg="#3E4C59", anchor="c")
+            self.total_records_total_label = tk.Label(self.total_records_panel, text="/000000", font=("Arial", 9, "bold"), fg="#66CDAA", bg="#3E4C59", anchor="c")
 
-        # Create Data menu
-        self.data_menu = tk.Menu(self.menubar, tearoff=0)
-        self.menubar.add_cascade(label="Data", menu=self.data_menu)
-        
-        # Create Import sub-menu
-        self.import_menu = tk.Menu(self.data_menu, tearoff=0)
-        self.data_menu.add_cascade(label="Import", menu=self.import_menu)
-        self.import_menu.add_command(label="Download Template", command=self.download_template)
-        self.import_menu.add_command(label="Import Data", command=self.upload_data)
+            self.update_total_records_label(0, 0)
+            self.total_records_label.grid(row=0, column=0, padx=0, pady=5, sticky="ew")
+            self.total_records_displayed_label.grid(row=0, column=1, padx=5, pady=5, sticky="e")
+            self.total_records_total_label.grid(row=0, column=2, padx=5, pady=5, sticky="e")
 
-        # Create Export sub-menu
-        self.export_menu = tk.Menu(self.data_menu, tearoff=0)
-        self.data_menu.add_cascade(label="Export", menu=self.export_menu)
-        self.export_menu.add_command(label="Export View", command=self.export_view)
-        self.export_menu.add_command(label="Export Database", command=self.export_database)
+            self.software_data = pd.DataFrame()  # Initialize data attribute
+            self.software_sort_orders = {}  # Track sort order for each column
+            self.min_window_width = 1200  # Default minimum window width
+            self.software_filtered_data = pd.DataFrame()  # Initialize filtered_data attribute
 
-        # Add Return option at the end of the menu
-        self.menubar.add_command(label="Return", command=self.confirm_return)
+            # Search UI
+            self.search_label = tk.Label(self.left_panel, text="Search:", font=("Arial", 10, "bold"), fg="#E4E7EB", bg="#3E4C59")
+            self.search_label.grid(row=0, column=0, padx=5, pady=5, sticky="w")
+            self.software_search_entry = tk.Entry(self.left_panel, font=("Arial", 10), bg="#F0F0F0", fg="#000000")
+            self.software_search_entry.grid(row=0, column=1, padx=5, pady=5, sticky="ew")            
 
-        # Set default padding and window resizing behavior
-        self.root.configure(padx=10, pady=10, bg="#323F4B")
-        self.root.columnconfigure(0, weight=1)
-        self.root.rowconfigure(1, weight=1)
+            self.search_filter_frame.columnconfigure(1, weight=1)
 
-        self.search_filter_frame = tk.Frame(self.root, padx=10, pady=5, bg="#3E4C59")
-        self.search_filter_frame.pack(fill='x', pady=5)
-        
-        # Split the filter panel into two halves
-        self.left_panel = tk.Frame(self.search_filter_frame, bg="#3E4C59")
-        self.left_panel.grid(row=0, column=0, sticky="nsew")
-        
-        self.right_panel = tk.Frame(self.search_filter_frame, bg="#3E4C59")
-        self.right_panel.grid(row=0, column=1, sticky="nsew")
-        
-        self.search_filter_frame.columnconfigure(0, weight=3)
-        self.search_filter_frame.columnconfigure(1, weight=1)
+            # Apply and Clear buttons
+            self.software_apply_button = tk.Button(self.left_panel, text="Search", command=self.apply_software_filter, font=("Arial", 9), bg="#4A5568", fg="#E4E7EB", activebackground="#6B7280")
+            self.software_apply_button.grid(row=0, column=2, pady=5, padx=5, sticky="ew")
+            self.software_clear_search_button = tk.Button(self.left_panel, text="Clear", command=self.clear_software_filter, font=("Arial", 9), bg="#4A5568", fg="#E4E7EB", activebackground="#6B7280")
+            self.software_clear_search_button.grid(row=0, column=3, padx=5, pady=5, sticky="w")
 
-        # Updated the total records label to ensure the position remains fixed
-        self.total_records_panel = tk.Frame(self.left_panel, bg="#3E4C59")
-        self.total_records_panel.grid(row=0, column=3, columnspan=2, sticky="nsew")
-        self.total_records_label = tk.Label(self.total_records_panel, text="Records Displayed:", font=("Arial", 9, "bold"), fg="#E4E7EB", bg="#3E4C59", anchor="c")
-        self.total_records_displayed_label = tk.Label(self.total_records_panel, text="000000", font=("Arial", 9, "bold"), fg="#66CDAA", bg="#3E4C59", anchor="c")
-        self.total_records_total_label = tk.Label(self.total_records_panel, text="/000000", font=("Arial", 9, "bold"), fg="#66CDAA", bg="#3E4C59", anchor="c")
+            # Treeview to display data
+            self.softare_tree_frame = tk.Frame(self.root, bg="#3E4C59")
+            self.softare_tree_frame.pack(expand=True, fill='both', padx=10, pady=10)
 
-        self.update_total_records_label(0, 0)
-        self.total_records_label.grid(row=0, column=0, padx=0, pady=5, sticky="ew")
-        self.total_records_displayed_label.grid(row=0, column=1, padx=5, pady=5, sticky="e")
-        self.total_records_total_label.grid(row=0, column=2, padx=5, pady=5, sticky="e")
+            self.software_tree_scroll = ttk.Scrollbar(self.softare_tree_frame, orient="vertical")
+            self.software_tree_scroll.pack(side="right", fill="y")
 
-        self.data = pd.DataFrame()  # Initialize data attribute
-        self.sort_orders = {}  # Track sort order for each column
-        self.min_window_width = 1200  # Default minimum window width
-        self.filters = {}  # Track active filters
-        self.filtered_data = pd.DataFrame()  # Initialize filtered_data attribute
+            self.software_tree_scroll_x = ttk.Scrollbar(self.softare_tree_frame, orient="horizontal")
+            self.software_tree_scroll_x.pack(side="bottom", fill="x")
 
-        # Search UI
-        self.search_label = tk.Label(self.left_panel, text="Search:", font=("Arial", 10, "bold"), fg="#E4E7EB", bg="#3E4C59")
-        self.search_label.grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.search_entry = tk.Entry(self.left_panel, font=("Arial", 10), bg="#F0F0F0", fg="#000000")
-        self.search_entry.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
-        self.clear_search_button = tk.Button(self.left_panel, text="Clear Search", command=self.clear_search_entry, font=("Arial", 9), bg="#4A5568", fg="#E4E7EB", activebackground="#6B7280")
-        self.clear_search_button.grid(row=0, column=2, padx=5, pady=5, sticky="w")
+            self.software_tree = ttk.Treeview(self.softare_tree_frame, yscrollcommand=self.software_tree_scroll.set, xscrollcommand=self.software_tree_scroll_x.set, style="Custom.Treeview")
+            self.software_tree.pack(side='left', expand=True, fill='both')
 
-        self.search_filter_frame.columnconfigure(1, weight=1)
+            self.software_tree_scroll.config(command=self.software_tree.yview)
+            self.software_tree_scroll_x.config(command=self.software_tree.xview)
 
-        # Filter UI for two filters with operator
-        self.filter_labels = []
-        self.filter_column_comboboxes = []
-        self.filter_operator_comboboxes = []
-        self.filter_value_entries = []
+            # Bind right-click menu for copying cell value and adding remark
+            self.software_tree.bind("<Button-3>", self.show_software_context_menu)
 
-        for i in range(3):  # Creating 3 filters
-            row = i + 1
-            # Filter Label
-            filter_label = tk.Label(self.left_panel, text=f"Filter {i + 1}:", font=("Arial", 10, "bold"), fg="#E4E7EB", bg="#3E4C59")
-            filter_label.grid(row=row, column=0, padx=5, pady=5, sticky="w")  # Consistent padding
-            self.filter_labels.append(filter_label)
+            self.software_tree["columns"] = ["SoftwareName", "Version", "InstalledDevices"]
+            self.software_tree["show"] = "headings"
 
-            # Filter Column Combobox
-            filter_column_combobox = ttk.Combobox(self.left_panel, values=["", "OperatingSystem", "Source", "Remarks"], state="readonly")
-            filter_column_combobox.grid(row=row, column=1, padx=5, pady=5, sticky="ew")
-            self.filter_column_comboboxes.append(filter_column_combobox)
+            self.software_tree.heading("SoftwareName", text="Software Name")
+            self.software_tree.heading("Version", text="Version")
+            self.software_tree.heading("InstalledDevices", text="Installed Devices")
 
-            # Filter Operator Combobox
-            filter_operator_combobox = ttk.Combobox(self.left_panel, values=["equals", "does not equal", "contains", "does not contain", "begins with", "does not begin with", "ends with", "does not end with"], state="readonly")
-            filter_operator_combobox.set("equals")
-            filter_operator_combobox.grid(row=row, column=2, padx=5, pady=5, sticky="ew")
-            self.filter_operator_comboboxes.append(filter_operator_combobox)
+            self.software_tree.column("SoftwareName", width=300, anchor="w")
+            self.software_tree.column("Version", width=150, anchor="center")
+            self.software_tree.column("InstalledDevices", width=150, anchor="center")
 
-            # Filter Value Entry
-            filter_value_entry = tk.Entry(self.left_panel, font=("Arial", 10), bg="#F0F0F0", fg="#000000")
-            filter_value_entry.grid(row=row, column=3, padx=5, pady=5, sticky="ew")
-            self.filter_value_entries.append(filter_value_entry)
+            self.software_tree.pack(expand=True, fill="both")
 
-        # Global Operator Combobox
-        self.operator_label = tk.Label(self.left_panel, text="Operator:", font=("Arial", 10, "bold"), fg="#E4E7EB", bg="#3E4C59")
-        self.operator_label.grid(row=1, column=4, padx=5, pady=5, sticky="w")
-        self.operator_combobox = ttk.Combobox(self.left_panel, values=["AND", "OR"], state="readonly")
-        self.operator_combobox.set("AND")
-        self.operator_combobox.grid(row=1, column=5, padx=5, pady=5, sticky="ew")
+            # Context menu for right-click
+            self.software_context_menu = tk.Menu(self.software_tree, tearoff=0)
+            self.software_context_menu.add_command(label="Copy", command=self.copy_software_cell_value)
 
-        # Apply and Clear buttons
-        self.apply_button = tk.Button(self.left_panel, text="Apply", command=self.apply_filters, font=("Arial", 9), bg="#4A5568", fg="#E4E7EB", activebackground="#6B7280")
-        self.apply_button.grid(row=2, column=4, columnspan=2, pady=5, padx=5, sticky="ew")
+            # Style for Treeview with borders
+            style = ttk.Style()
+            style.configure("Custom.Treeview", rowheight=25, borderwidth=1, relief="solid", font=("Arial", 10), foreground="#E4E7EB", background="#323F4B", fieldbackground="#323F4B")
+            style.configure("Treeview.Heading", font=("Arial", 10, "bold"), foreground="#3E4C59", background="#1F2933")
+            style.layout("Custom.Treeview", [
+                ("Custom.Treeview.treearea", {'sticky': 'nswe'})
+            ])
 
-        self.clear_button = tk.Button(self.left_panel, text="Clear", command=self.clear_filters, font=("Arial", 9), bg="#4A5568", fg="#E4E7EB", activebackground="#6B7280")
-        self.clear_button.grid(row=3, column=4, columnspan=2, pady=5, padx=5, sticky="ew")
+            # Pagination Frame for the buttons
+            self.pagination_frame = tk.Frame(self.root, bg="#3E4C59", pady=10)
+            self.pagination_frame.pack(fill='x', pady=5)
 
-        # Treeview to display data
-        self.tree_frame = tk.Frame(self.root, bg="#3E4C59")
-        self.tree_frame.pack(expand=True, fill='both', padx=10, pady=10)
+            # Pagination Buttons
+            self.software_previous_button = tk.Button(self.pagination_frame, text="Previous Page", command=self.previous_software_page, font=("Arial", 10), bg="#4A5568", fg="#E4E7EB", activebackground="#6B7280")
+            self.software_previous_button.pack(side='left', padx=10)
 
-        self.tree_scroll = ttk.Scrollbar(self.tree_frame, orient="vertical")
-        self.tree_scroll.pack(side="right", fill="y")
+            # Page Number Label (moved to the center)
+            self.softwarepage_number_label = tk.Label(self.pagination_frame, text="Page 1 / 1", font=("Arial", 10), bg="#3E4C59", fg="#E4E7EB")
+            self.softwarepage_number_label.pack(side='left', expand=True)
 
-        self.tree_scroll_x = ttk.Scrollbar(self.tree_frame, orient="horizontal")
-        self.tree_scroll_x.pack(side="bottom", fill="x")
+            self.software_next_button = tk.Button(self.pagination_frame, text="Next Page", command=self.next_software_page, font=("Arial", 10), bg="#4A5568", fg="#E4E7EB", activebackground="#6B7280")
+            self.software_next_button.pack(side='right', padx=10)
+            
+            # Set minimum window width based on total column width
+            total_width = max(self.min_window_width, sum([max(100, len(col) * 10) for col in self.software_tree['columns']]))
+            self.root.minsize(width=total_width, height=600)
+            self.root.geometry(f"{total_width}x600") 
 
-        self.tree = ttk.Treeview(self.tree_frame, yscrollcommand=self.tree_scroll.set, xscrollcommand=self.tree_scroll_x.set, style="Custom.Treeview")
-        self.tree.pack(side='left', expand=True, fill='both')
+            # Load Excel data automatically
+            self.load_software_data()
 
-        self.tree_scroll.config(command=self.tree.yview)
-        self.tree_scroll_x.config(command=self.tree.xview)
+            # Update the display
+            self.root.update()
 
-        # Bind right-click menu for copying cell value and adding remark
-        self.tree.bind("<Button-3>", self.show_context_menu)
+        else:
+            # Create a menu bar
+            self.menubar = tk.Menu(self.root, bg="#1F2933", fg="#E4E7EB")
+            self.root.config(menu=self.menubar)
 
-        # Context menu for right-click
-        self.context_menu = tk.Menu(self.tree, tearoff=0)
-        self.context_menu.add_command(label="Copy", command=self.copy_cell_value)
-        self.context_menu.add_command(label="Add/Edit Remark", command=self.add_edit_remark)
-        self.context_menu.add_command(label="BitLocker Keys", command=self.retrieve_bitlocker_key)
+            # Create File menu
+            self.file_menu = tk.Menu(self.menubar, tearoff=0)
+            self.menubar.add_cascade(label="File", menu=self.file_menu)
+                    
+            self.file_menu.add_command(label="Refresh Data", command=self.refresh_data)
+            self.file_menu.add_command(label="Exit", command=self.root.quit)
 
-        # Style for Treeview with borders
-        style = ttk.Style()
-        style.configure("Custom.Treeview", rowheight=25, borderwidth=1, relief="solid", font=("Arial", 10), foreground="#E4E7EB", background="#323F4B", fieldbackground="#323F4B")
-        style.configure("Treeview.Heading", font=("Arial", 10, "bold"), foreground="#3E4C59", background="#1F2933")
-        style.layout("Custom.Treeview", [
-            ("Custom.Treeview.treearea", {'sticky': 'nswe'})
-        ])
+            # Create View menu
+            self.view_menu = tk.Menu(self.menubar, tearoff=0)
+            self.menubar.add_cascade(label="View", menu=self.view_menu)
 
-        # Pagination Frame for the buttons
-        self.pagination_frame = tk.Frame(self.root, bg="#3E4C59", pady=10)
-        self.pagination_frame.pack(fill='x', pady=5)
+            # Create Columns sub-menu under View menu
+            self.columns_menu = tk.Menu(self.view_menu, tearoff=0)
+            self.view_menu.add_cascade(label="Columns", menu=self.columns_menu)
 
-        # Pagination Buttons
-        self.previous_button = tk.Button(self.pagination_frame, text="Previous Page", command=self.previous_page, font=("Arial", 10), bg="#4A5568", fg="#E4E7EB", activebackground="#6B7280")
-        self.previous_button.pack(side='left', padx=10)
+            # Get columns from Devices table and add as sub-options under Columns (excluding certain columns)
+            self.columns_to_exclude = ["DeviceName", "SerialNumber", "OperatingSystem", "IntuneLastSync", "Source", "Remarks"]
+            with sqlite3.connect('inventory.db', timeout=30) as conn:
+                cursor = conn.cursor()
+                cursor.execute("PRAGMA table_info(Devices)")
+                columns = [info[1] for info in cursor.fetchall() if info[1] not in self.columns_to_exclude]
 
-        # Page Number Label (moved to the center)
-        self.page_number_label = tk.Label(self.pagination_frame, text="Page 1 / 1", font=("Arial", 10), bg="#3E4C59", fg="#E4E7EB")
-        self.page_number_label.pack(side='left', expand=True)
+            self.column_vars = {}
+            for column in columns:
+                self.column_vars[column] = tk.BooleanVar(value=False)
+                self.columns_menu.add_checkbutton(
+                    label=column,
+                    onvalue=True,
+                    offvalue=False,
+                    variable=self.column_vars[column],
+                    command=lambda col=column: self.toggle_column(col)
+                )
 
-        self.next_button = tk.Button(self.pagination_frame, text="Next Page", command=self.next_page, font=("Arial", 10), bg="#4A5568", fg="#E4E7EB", activebackground="#6B7280")
-        self.next_button.pack(side='right', padx=10)
-        
-        # Set minimum window width based on total column width
-        total_width = max(self.min_window_width, sum([max(100, len(col) * 10) for col in self.tree['columns']]))
-        self.root.minsize(width=total_width, height=600)
-        self.root.geometry(f"{total_width}x600") 
+            # Initialize selected columns
+            self.selected_columns = self.columns_to_exclude.copy()
 
-        # Load Excel data automatically
-        self.load_data()
+            # Create Data menu
+            self.data_menu = tk.Menu(self.menubar, tearoff=0)
+            self.menubar.add_cascade(label="Data", menu=self.data_menu)
+            
+            # Create Import sub-menu
+            self.import_menu = tk.Menu(self.data_menu, tearoff=0)
+            self.data_menu.add_cascade(label="Import", menu=self.import_menu)
+            self.import_menu.add_command(label="Download Template", command=self.download_template)
+            self.import_menu.add_command(label="Import Data", command=self.upload_data)
 
-        # Update the display
-        self.root.update()
+            # Create Export sub-menu
+            self.export_menu = tk.Menu(self.data_menu, tearoff=0)
+            self.data_menu.add_cascade(label="Export", menu=self.export_menu)
+            self.export_menu.add_command(label="Export View", command=self.export_view)
+            self.export_menu.add_command(label="Export Database", command=self.export_database)
+
+            # Add Return option at the end of the menu
+            self.menubar.add_command(label="Return", command=self.confirm_return)
+
+            # Set default padding and window resizing behavior
+            self.root.configure(padx=10, pady=10, bg="#323F4B")
+            self.root.columnconfigure(0, weight=1)
+            self.root.rowconfigure(1, weight=1)
+
+            self.search_filter_frame = tk.Frame(self.root, padx=10, pady=5, bg="#3E4C59")
+            self.search_filter_frame.pack(fill='x', pady=5)
+            
+            # Split the filter panel into two halves
+            self.left_panel = tk.Frame(self.search_filter_frame, bg="#3E4C59")
+            self.left_panel.grid(row=0, column=0, sticky="nsew")
+            
+            self.right_panel = tk.Frame(self.search_filter_frame, bg="#3E4C59")
+            self.right_panel.grid(row=0, column=1, sticky="nsew")
+            
+            self.search_filter_frame.columnconfigure(0, weight=3)
+            self.search_filter_frame.columnconfigure(1, weight=1)
+
+            # Updated the total records label to ensure the position remains fixed
+            self.total_records_panel = tk.Frame(self.left_panel, bg="#3E4C59")
+            self.total_records_panel.grid(row=0, column=3, columnspan=2, sticky="nsew")
+            self.total_records_label = tk.Label(self.total_records_panel, text="Records Displayed:", font=("Arial", 9, "bold"), fg="#E4E7EB", bg="#3E4C59", anchor="c")
+            self.total_records_displayed_label = tk.Label(self.total_records_panel, text="000000", font=("Arial", 9, "bold"), fg="#66CDAA", bg="#3E4C59", anchor="c")
+            self.total_records_total_label = tk.Label(self.total_records_panel, text="/000000", font=("Arial", 9, "bold"), fg="#66CDAA", bg="#3E4C59", anchor="c")
+
+            self.update_total_records_label(0, 0)
+            self.total_records_label.grid(row=0, column=0, padx=0, pady=5, sticky="ew")
+            self.total_records_displayed_label.grid(row=0, column=1, padx=5, pady=5, sticky="e")
+            self.total_records_total_label.grid(row=0, column=2, padx=5, pady=5, sticky="e")
+
+            self.data = pd.DataFrame()  # Initialize data attribute
+            self.sort_orders = {}  # Track sort order for each column
+            self.min_window_width = 1200  # Default minimum window width
+            self.filters = {}  # Track active filters
+            self.filtered_data = pd.DataFrame()  # Initialize filtered_data attribute
+
+            # Search UI
+            self.search_label = tk.Label(self.left_panel, text="Search:", font=("Arial", 10, "bold"), fg="#E4E7EB", bg="#3E4C59")
+            self.search_label.grid(row=0, column=0, padx=5, pady=5, sticky="w")
+            self.search_entry = tk.Entry(self.left_panel, font=("Arial", 10), bg="#F0F0F0", fg="#000000")
+            self.search_entry.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+            self.clear_search_button = tk.Button(self.left_panel, text="Clear Search", command=self.clear_search_entry, font=("Arial", 9), bg="#4A5568", fg="#E4E7EB", activebackground="#6B7280")
+            self.clear_search_button.grid(row=0, column=2, padx=5, pady=5, sticky="w")
+
+            self.search_filter_frame.columnconfigure(1, weight=1)
+
+            # Filter UI for two filters with operator
+            self.filter_labels = []
+            self.filter_column_comboboxes = []
+            self.filter_operator_comboboxes = []
+            self.filter_value_entries = []
+
+            for i in range(3):  # Creating 3 filters
+                row = i + 1
+                # Filter Label
+                filter_label = tk.Label(self.left_panel, text=f"Filter {i + 1}:", font=("Arial", 10, "bold"), fg="#E4E7EB", bg="#3E4C59")
+                filter_label.grid(row=row, column=0, padx=5, pady=5, sticky="w")  # Consistent padding
+                self.filter_labels.append(filter_label)
+
+                # Filter Column Combobox
+                filter_column_combobox = ttk.Combobox(self.left_panel, values=["", "DeviceName", "SerialNumber", "OperatingSystem", "Source", "Remarks"], state="readonly")
+                filter_column_combobox.grid(row=row, column=1, padx=5, pady=5, sticky="ew")
+                self.filter_column_comboboxes.append(filter_column_combobox)
+
+                # Filter Operator Combobox
+                filter_operator_combobox = ttk.Combobox(self.left_panel, values=["equals", "does not equal", "contains", "does not contain", "begins with", "does not begin with", "ends with", "does not end with"], state="readonly")
+                filter_operator_combobox.set("equals")
+                filter_operator_combobox.grid(row=row, column=2, padx=5, pady=5, sticky="ew")
+                self.filter_operator_comboboxes.append(filter_operator_combobox)
+
+                # Filter Value Entry
+                filter_value_entry = tk.Entry(self.left_panel, font=("Arial", 10), bg="#F0F0F0", fg="#000000")
+                filter_value_entry.grid(row=row, column=3, padx=5, pady=5, sticky="ew")
+                self.filter_value_entries.append(filter_value_entry)
+
+            # Global Operator Combobox
+            self.operator_label = tk.Label(self.left_panel, text="Operator:", font=("Arial", 10, "bold"), fg="#E4E7EB", bg="#3E4C59")
+            self.operator_label.grid(row=1, column=4, padx=5, pady=5, sticky="w")
+            self.operator_combobox = ttk.Combobox(self.left_panel, values=["AND", "OR"], state="readonly")
+            self.operator_combobox.set("AND")
+            self.operator_combobox.grid(row=1, column=5, padx=5, pady=5, sticky="ew")
+
+            # Apply and Clear buttons
+            self.apply_button = tk.Button(self.left_panel, text="Apply", command=self.apply_filters, font=("Arial", 9), bg="#4A5568", fg="#E4E7EB", activebackground="#6B7280")
+            self.apply_button.grid(row=2, column=4, columnspan=2, pady=5, padx=5, sticky="ew")
+
+            self.clear_button = tk.Button(self.left_panel, text="Clear", command=self.clear_filters, font=("Arial", 9), bg="#4A5568", fg="#E4E7EB", activebackground="#6B7280")
+            self.clear_button.grid(row=3, column=4, columnspan=2, pady=5, padx=5, sticky="ew")
+
+            # Treeview to display data
+            self.tree_frame = tk.Frame(self.root, bg="#3E4C59")
+            self.tree_frame.pack(expand=True, fill='both', padx=10, pady=10)
+
+            self.tree_scroll = ttk.Scrollbar(self.tree_frame, orient="vertical")
+            self.tree_scroll.pack(side="right", fill="y")
+
+            self.tree_scroll_x = ttk.Scrollbar(self.tree_frame, orient="horizontal")
+            self.tree_scroll_x.pack(side="bottom", fill="x")
+
+            self.tree = ttk.Treeview(self.tree_frame, yscrollcommand=self.tree_scroll.set, xscrollcommand=self.tree_scroll_x.set, style="Custom.Treeview")
+            self.tree.pack(side='left', expand=True, fill='both')
+
+            self.tree_scroll.config(command=self.tree.yview)
+            self.tree_scroll_x.config(command=self.tree.xview)
+
+            # Bind right-click menu for copying cell value and adding remark
+            self.tree.bind("<Button-3>", self.show_context_menu)
+
+            # Context menu for right-click
+            self.context_menu = tk.Menu(self.tree, tearoff=0)
+            self.context_menu.add_command(label="Copy", command=self.copy_cell_value)
+            self.context_menu.add_command(label="Add/Edit Remark", command=self.add_edit_remark)
+            self.context_menu.add_command(label="BitLocker Keys", command=self.retrieve_bitlocker_key)
+            self.context_menu.add_command(label="Refresh", command=self.refresh_device_info)
+
+            # Style for Treeview with borders
+            style = ttk.Style()
+            style.configure("Custom.Treeview", rowheight=25, borderwidth=1, relief="solid", font=("Arial", 10), foreground="#E4E7EB", background="#323F4B", fieldbackground="#323F4B")
+            style.configure("Treeview.Heading", font=("Arial", 10, "bold"), foreground="#3E4C59", background="#1F2933")
+            style.layout("Custom.Treeview", [
+                ("Custom.Treeview.treearea", {'sticky': 'nswe'})
+            ])
+
+            # Pagination Frame for the buttons
+            self.pagination_frame = tk.Frame(self.root, bg="#3E4C59", pady=10)
+            self.pagination_frame.pack(fill='x', pady=5)
+
+            # Pagination Buttons
+            self.previous_button = tk.Button(self.pagination_frame, text="Previous Page", command=self.previous_page, font=("Arial", 10), bg="#4A5568", fg="#E4E7EB", activebackground="#6B7280")
+            self.previous_button.pack(side='left', padx=10)
+
+            # Page Number Label (moved to the center)
+            self.page_number_label = tk.Label(self.pagination_frame, text="Page 1 / 1", font=("Arial", 10), bg="#3E4C59", fg="#E4E7EB")
+            self.page_number_label.pack(side='left', expand=True)
+
+            self.next_button = tk.Button(self.pagination_frame, text="Next Page", command=self.next_page, font=("Arial", 10), bg="#4A5568", fg="#E4E7EB", activebackground="#6B7280")
+            self.next_button.pack(side='right', padx=10)
+            
+            # Set minimum window width based on total column width
+            total_width = max(self.min_window_width, sum([max(100, len(col) * 10) for col in self.tree['columns']]))
+            self.root.minsize(width=total_width, height=600)
+            self.root.geometry(f"{total_width}x600") 
+
+            # Load Excel data automatically
+            self.load_data()
+
+            # Update the display
+            self.root.update()
 
     def export_view(self):
         file_path = filedialog.asksaveasfilename(
@@ -1393,30 +1968,30 @@ class DeviceInventoryApp:
         self.tree["column"] = self.selected_columns
         self.tree["show"] = "headings"
 
+        # Synchronize the menu checkboxes with the selected columns
+        for col, var in self.column_vars.items():
+            var.set(col in self.selected_columns)
+
+        # Configure TreeView headings and column properties
         for col in self.selected_columns:
-            if col in current_column_widths:
-                column_width = current_column_widths[col]
-            else:
-                column_width = new_column_width
             self.tree.heading(col, text=col, command=lambda _col=col: self.sort_data(_col))
-            self.tree.column(col, width=column_width, minwidth=column_width, stretch=True, anchor='center')
+            header_width = max(100, len(col) * 10)  # Ensure a default minimum width for headers
+            self.tree.column(col, width=header_width, minwidth=header_width, stretch=True, anchor="center")
 
-        # Insert data back into the treeview
-        for _, row in self.data.iterrows():
-            self.tree.insert("", "end", values=[row[col] for col in self.selected_columns])
+        # Insert the data into the TreeView
+        for _, row in self.filtered_data.iterrows():
+            row_values = [row[col] for col in self.selected_columns]
+            self.tree.insert("", "end", values=row_values)
 
-        # Reset all comboboxes if they are currently selected
-        self.clear_search_and_filters_inputs()
+        # Adjust window width to match the selected columns
+        self.adjust_window_width()
 
-        # Update filter options based on selected columns
-        self.update_filter_columns()
-
-        self.force_redraw()
+        # Refresh the display
         self.root.update_idletasks()
 
     def update_filter_columns(self):
         # Update filter column options based on the selected columns in the treeview
-        columns_to_exclude = ['DeviceName','SerialNumber','DeviceID','MAC','ReportTime','EntraLastSync','IntuneLastSync']
+        columns_to_exclude = ['SerialNumber','IntuneDeviceID', 'EntraDeviceID', 'MAC','ReportTime','IntuneLastSync']
         available_values = ["", *[col for col in self.selected_columns if col not in columns_to_exclude]]
         for combobox in self.filter_column_comboboxes:
             combobox["values"] = available_values
@@ -1457,6 +2032,18 @@ class DeviceInventoryApp:
         # Prompt user for confirmation before returning to the main page
         confirm = messagebox.askyesno("Confirm Return", "Are you sure you want to return to the main page?")
         if confirm:
+            # Reset the selected columns to default
+            self.selected_columns = self.columns_to_exclude.copy()
+
+            # Uncheck all menu options for non-default columns
+            for col, var in self.column_vars.items():  # Assuming column_vars is a dict of {column_name: BooleanVar}
+                if col not in self.columns_to_exclude:
+                    var.set(False)
+
+            # Update TreeView to reflect only default columns
+            self.update_treeview_columns()
+
+            # Return to the main screen
             self.return_to_main_screen()
 
     def refresh_data(self):
@@ -1510,18 +2097,10 @@ class DeviceInventoryApp:
     def run_refresh_data(self, progress_window, progress, *args):
         file_path = r"DeviceInventory.xlsx"
         try:
-            # Authenticate to Microsoft Graph to retrieve Intune data
-            access_token = self.get_access_token()
-            
-            # Retrieve Intune device information
-            intune_devices = self.retrieve_intune_devices(access_token)
-
             # Export the retrieved device information to the database
-            self.export_to_database(intune_devices)                
-
-            # Load the updated data from the Excel file
+            self.export_to_database()                
             new_data = pd.read_excel(file_path).fillna("")  # Ensure no NaN values
-            new_data.dropna(subset=['DeviceName', 'SerialNumber'], how='all', inplace=True)
+            #new_data.dropna(subset=['DeviceName', 'SerialNumber'], how='all', inplace=True)
 
             # Create a new SQLite connection for this thread
             with sqlite3.connect('inventory.db', timeout=10) as thread_conn:
@@ -1556,28 +2135,26 @@ class DeviceInventoryApp:
 
                         if new_date > existing_date:
                             thread_cursor.execute('''UPDATE Devices SET 
-                                                    User = ?, OperatingSystem = ?, DeviceID = ?, OSVersion = ?,
-                                                    ComplianceState = ?, Model = ?, Manufacturer = ?, Source = ?,
-                                                    MAC = ?, Encryption = ?, IntuneLastSync = ?, ReportTime = ?,
-                                                    UserDisplayName = ?, JobTitle = ?, Department = ?, EmployeeID = ?, 
-                                                    City = ?, Country = ?, Manager = ?, EntraLastSync = ?, 
-                                                    TrustType = ?, TotalStorage = ?, FreeStorage = ?, PhysicalMemory = ? 
+                                                    UserPrincipalName = ?, OperatingSystem = ?, EntraDeviceID = ?, IntuneDeviceID = ?, OSVersion = ?, 
+                                                    ComplianceState = ?, Source = ?,
+                                                    Model = ?, Manufacturer = ?, MAC = ?, IntuneLastSync = ?, ReportTime = ?, Encryption = ?,
+                                                    UserDisplayName = ?, JobTitle = ?, Department = ?, City = ?, Country = ?,
+                                                    TrustType = ?, TotalStorage = ?, FreeStorage = ?, PhysicalMemory = ?
                                                     WHERE DeviceName = ? AND SerialNumber = ?''', 
-                                                (new_row['User'], new_row['OperatingSystem'], new_row['DeviceID'], new_row['OSVersion'],
-                                                new_row['ComplianceState'], new_row['Model'], new_row['Manufacturer'], source_value,
-                                                new_row['MAC'], new_row['Encryption'], new_row['IntuneLastSync'], report_time_str,
-                                                new_row['UserDisplayName'], new_row['JobTitle'], new_row['Department'], new_row['EmployeeID'], 
-                                                new_row['City'], new_row['Country'], new_row['Manager'], new_row['EntraLastSync'],
-                                                new_row['TrustType'], new_row['TotalStorage'], new_row['FreeStorage'], new_row['PhysicalMemory'],
+                                                (new_row['UserPrincipalName'], new_row['OperatingSystem'], new_row['EntraDeviceID'], new_row['IntuneDeviceID'],
+                                                new_row['OSVersion'], new_row['ComplianceState'], source_value,
+                                                new_row['Model'], new_row['Manufacturer'], new_row['MAC'], new_row['IntuneLastSync'], 
+                                                report_time_str, new_row['Encryption'], new_row['UserDisplayName'], new_row['JobTitle'], new_row['Department'],                                                  
+                                                new_row['City'], new_row['Country'], new_row['TrustType'], new_row['TotalStorage'], 
+                                                new_row['FreeStorage'], new_row['PhysicalMemory'],
                                                 device_name, serial_number))
                     else:
-                        thread_cursor.execute('REPLACE INTO Devices VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', 
-                                            (device_name, serial_number, new_row['User'], new_row['DeviceID'],
+                        thread_cursor.execute('REPLACE INTO Devices VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', 
+                                            (device_name, serial_number, new_row['UserPrincipalName'], new_row['EntraDeviceID'], new_row['IntuneDeviceID'],
                                             new_row['OperatingSystem'], new_row['OSVersion'], new_row['ComplianceState'], 'Cloud',
                                             new_row['Model'], new_row['Manufacturer'], new_row['MAC'], new_row['IntuneLastSync'],
                                             report_time_str, new_row['Encryption'], new_row['UserDisplayName'], new_row['JobTitle'], new_row['Department'], 
-                                            new_row['EmployeeID'], new_row['City'], new_row['Country'], new_row['Manager'], new_row['EntraLastSync'], 
-                                            new_row['TrustType'], new_row['TotalStorage'], new_row['FreeStorage'], new_row['PhysicalMemory']))
+                                            new_row['City'], new_row['Country'], new_row['TrustType'], new_row['TotalStorage'], new_row['FreeStorage'], new_row['PhysicalMemory']))
 
                 # Step: Identify records in the database but not in the latest Excel data and update Source to "Local"                
                 thread_cursor.execute("SELECT SerialNumber, DeviceName, Source FROM Devices")
@@ -1860,6 +2437,33 @@ class DeviceInventoryApp:
                     self.display_data(self.filtered_data)
                 except Exception as e:
                     messagebox.showerror("Error", f"Failed to sort data: {e}")
+    
+    def sort_software_data(self, column):
+        if self.software_filtered_data is not None:
+            if column:
+                try:
+                    # Determine sort order (toggle between ascending and descending)
+                    if column in self.software_sort_orders and self.software_sort_orders[column] == 'asc':
+                        ascending = False
+                        self.software_sort_orders[column] = 'desc'
+                    else:
+                        ascending = True
+                        self.software_sort_orders[column] = 'asc'
+
+                    # Convert the column to string to avoid mixed type comparison issues
+                    self.software_filtered_data[column] = self.software_filtered_data[column].astype(str)
+
+                    # Sort the entire filtered dataset
+                    sorted_data = self.software_filtered_data.sort_values(by=[column], ascending=ascending)
+
+                    # Update the filtered data and reset pagination
+                    self.software_filtered_data = sorted_data.copy()
+                    self.software_current_page = 0  # Reset to the first page after sorting
+                    
+                    # Display data with the currently selected columns maintained
+                    self.display_software_data(self.software_filtered_data)
+                except Exception as e:
+                    messagebox.showerror("Error", f"Failed to sort data: {e}")
 
     def show_context_menu(self, event):
         # Get the selected item
@@ -1868,11 +2472,31 @@ class DeviceInventoryApp:
             self.tree.selection_set(item_id)
             self.context_menu.post(event.x_root, event.y_root)
 
+    def show_software_context_menu(self, event):
+        # Get the selected item
+        item_id = self.software_tree.identify_row(event.y)
+        if item_id:
+            self.software_tree.selection_set(item_id)
+            self.software_context_menu.post(event.x_root, event.y_root)
+
     def copy_cell_value(self):
         selected_item = self.tree.selection()
         if selected_item:
             item_values = self.tree.item(selected_item, "values")
             column_index = self.tree.identify_column(self.tree.winfo_pointerx() - self.tree.winfo_rootx()).replace("#", "")
+            if column_index.isdigit():
+                column_index = int(column_index) - 1
+                if 0 <= column_index < len(item_values):
+                    value = item_values[column_index]
+                    self.root.clipboard_clear()
+                    self.root.clipboard_append(value)
+                    self.root.update()  # Now it stays on the clipboard
+
+    def copy_software_cell_value(self):
+        selected_item = self.software_tree.selection()
+        if selected_item:
+            item_values = self.software_tree.item(selected_item, "values")
+            column_index = self.software_tree.identify_column(self.software_tree.winfo_pointerx() - self.software_tree.winfo_rootx()).replace("#", "")
             if column_index.isdigit():
                 column_index = int(column_index) - 1
                 if 0 <= column_index < len(item_values):
