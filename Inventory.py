@@ -35,9 +35,7 @@ class DeviceInventoryApp:
             self.session.proxies.clear()
 
         # Intune Graph API credentials
-        self.client_id = '2ca3083d-78b8-4fe5-a509-f0ea09d2f7da'
-        self.client_secret = 'F0-8Q~vY.lPo.4cXpAIQ-xzlV4wDRBbQsIvmbctE'
-        self.tenant_id = '1acfda79-c7e2-4b4b-8bcc-06449fbe9213'
+
         self.authority = f"https://login.microsoftonline.com/{self.tenant_id}"
         self.scope = ["User.Read"]
 
@@ -1104,15 +1102,17 @@ class DeviceInventoryApp:
                 # Retrieve device details from Microsoft Graph API
                 device_url = f"https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/{intune_device_id}"
                 response = requests.get(device_url, headers=headers, verify=False, proxies=self.PROXIES)
-                
+                print("Intune Device Info Retrieved")
                 if response.status_code == 200:
                     device_data = response.json()
                     total_storage = device_data.get('totalStorageSpaceInBytes', '')
                     free_storage = device_data.get('freeStorageSpaceInBytes', '')
 
                     # Convert to GB and round to the nearest integer if the value is not 'N/A'
-                    total_storage_gb = int(round(total_storage / (1024 ** 3))) if isinstance(total_storage, (int, float)) and total_storage != '' else ''
-                    free_storage_gb = int(round(free_storage / (1024 ** 3))) if isinstance(free_storage, (int, float)) and free_storage != '' else ''
+                    total_storage_gb = str(int(round(total_storage / (1024 ** 3))) if isinstance(total_storage, (int, float)) and total_storage != '' else '')
+                    free_storage_gb = str(int(round(free_storage / (1024 ** 3))) if isinstance(free_storage, (int, float)) and free_storage != '' else '')
+                    print("Total Storage: " + total_storage_gb)
+                    print("Total Storage: " + free_storage_gb)
                     updated_values = {
                         "OperatingSystem": device_data.get("operatingSystem", ""),
                         "OSVersion": device_data.get("osVersion", ""),
@@ -1125,7 +1125,7 @@ class DeviceInventoryApp:
                         'UserPrincipalName': device_data.get('UserPrincipalName', ""),                        
                         'MAC': device_data.get('MAC', ""),                        
                         'ReportTime': time.strftime("%Y-%m-%d %H:%M:%S"),
-                        'Source': "Intune",
+                        'Source': "Cloud",
                         'Encryption': device_data.get('Encryption', ""),                        
                         'TotalStorage': total_storage_gb,
                         'FreeStorage': free_storage_gb
@@ -1134,11 +1134,11 @@ class DeviceInventoryApp:
                     # Retrieve physical memory details from the separate API
                     memory_url = f"https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/{intune_device_id}?$select=physicalMemoryInBytes"
                     memory_response = requests.get(memory_url, headers=headers, verify=False, proxies=self.PROXIES)
-
+                    print("Device Memory Info Retrieved")
                     if memory_response.status_code == 200:
                         memory_data = memory_response.json()
                         physical_memory = memory_data.get("physicalMemoryInBytes", 0)
-                        physical_memory_gb = int(round(physical_memory / (1024 ** 3))) if isinstance(physical_memory, (int, float)) and physical_memory != '' else ''
+                        physical_memory_gb = str(int(round(physical_memory / (1024 ** 3))) if isinstance(physical_memory, (int, float)) and physical_memory != '' else '')
                         updated_values["PhysicalMemory"] = physical_memory_gb
                     else:
                         updated_values["PhysicalMemory"] = ""
@@ -1148,7 +1148,7 @@ class DeviceInventoryApp:
                     if user_principal_name:
                         user_url = f"https://graph.microsoft.com/v1.0/users/{user_principal_name}?$select=displayName,jobTitle,department,city,country"
                         user_response = requests.get(user_url, headers=headers, verify=False, proxies=self.PROXIES)
-
+                        print("User Info Retrieved")
                         if user_response.status_code == 200:
                             user_data = user_response.json()
                             updated_values.update({
@@ -1162,7 +1162,7 @@ class DeviceInventoryApp:
                     # Retrieve Entra device details for trustType
                     entra_device_url = f"https://graph.microsoft.com/v1.0/devices?$filter=deviceId eq '{entra_device_id}'&$select=trustType"
                     entra_response = requests.get(entra_device_url, headers=headers, verify=False, proxies=self.PROXIES)
-
+                    print("Entra Device Info Retrieved")
                     if entra_response.status_code == 200:
                         entra_data = entra_response.json().get("value", [])
                         if entra_data:
@@ -1182,7 +1182,7 @@ class DeviceInventoryApp:
                                             IntuneDeviceID = ?,
                                             UserPrincipalName = ?,
                                             MAC = ?,
-                                            ReportTime = ?
+                                            ReportTime = ?,
                                             TotalStorage = ?,
                                             FreeStorage = ?,
                                             PhysicalMemory = ?,
@@ -1194,19 +1194,20 @@ class DeviceInventoryApp:
                                             TrustType = ?
                                             WHERE DeviceName = ? AND SerialNumber = ?''',
                                         (
-                                            updated_values["OperatingSystem"],
-                                            updated_values["OSVersion"],
-                                            updated_values["ComplianceState"],
-                                            updated_values["Manufacturer"],
-                                            updated_values["Model"],
-                                            updated_values["IntuneLastSync"],
-                                            updated_values["EntraDeviceID"],
-                                            updated_values["IntuneDeviceID"],
-                                            updated_values["UserPrincipalName"],
-                                            updated_values["MAC"],
-                                            updated_values["TotalStorage"],
-                                            updated_values["FreeStorage"],
-                                            updated_values["PhysicalMemory"],
+                                            updated_values.get("OperatingSystem", ""),
+                                            updated_values.get("OSVersion", ""),
+                                            updated_values.get("ComplianceState", ""),
+                                            updated_values.get("Manufacturer", ""),
+                                            updated_values.get("Model", ""),
+                                            updated_values.get("IntuneLastSync", ""),
+                                            updated_values.get("EntraDeviceID", ""),
+                                            updated_values.get("IntuneDeviceID", ""),
+                                            updated_values.get("UserPrincipalName", ""),
+                                            updated_values.get("MAC", ""),
+                                            updated_values.get("ReportTime", ""),
+                                            updated_values.get("TotalStorage", ""),
+                                            updated_values.get("FreeStorage", ""),
+                                            updated_values.get("PhysicalMemory", ""),
                                             updated_values.get("UserDisplayName", ""),
                                             updated_values.get("JobTitle", ""),
                                             updated_values.get("Department", ""),
@@ -1217,7 +1218,7 @@ class DeviceInventoryApp:
                                             serial_number
                                         ))
                     self.conn.commit()
-
+                    print("Device Info Written")
                     # Update the data in the TreeView
                     for col, idx in columns_mapping.items():
                         if col in updated_values:
