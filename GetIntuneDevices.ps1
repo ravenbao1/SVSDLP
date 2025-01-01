@@ -3,9 +3,9 @@
 # Install-Module -Name ImportExcel -Force -AllowClobber
 
 # Azure AD App Registration details
-$clientId = "2ca3083d-78b8-4fe5-a509-f0ea09d2f7da"
-$clientSecret = "F0-8Q~vY.lPo.4cXpAIQ-xzlV4wDRBbQsIvmbctE"
-$tenantId = "1acfda79-c7e2-4b4b-8bcc-06449fbe9213"
+$clientId = ""
+$clientSecret = ""
+$tenantId = ""
 
 # Authenticate to Microsoft Graph to retrieve Intune data
 $tokenBody = @{  
