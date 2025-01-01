@@ -10,6 +10,7 @@ import traceback
 import requests
 import urllib3
 import os
+import subprocess
 from msal import PublicClientApplication
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -725,15 +726,15 @@ class DeviceInventoryApp:
         progress.pack(pady=20)
         progress.start()
 
-        file_path = r"DeviceInventory.xlsx"
+        file_path = r"DeviceInventory.csv"
         try:
             # Step 1: Load data from the Devices table in the database
             with sqlite3.connect('inventory.db', timeout=30) as conn:
                 devices_data = pd.read_sql_query("SELECT * FROM Devices", conn)
                 devices_data = devices_data.fillna("")
 
-            # Step 2: Load data from Excel file
-            excel_data = pd.read_excel(file_path)
+            # Step 2: Load data from CSV file
+            excel_data = pd.read_csv(file_path)
             excel_data.dropna(subset=['DeviceName', 'SerialNumber'], how='all', inplace=True)
             excel_data = excel_data.fillna("")
 
@@ -750,7 +751,7 @@ class DeviceInventoryApp:
             if 'Remarks' not in devices_data.columns:
                 devices_data['Remarks'] = ""
 
-            # Combine data from Devices table and Excel data
+            # Combine data from Devices table and CSV data
             if not devices_data.empty and not excel_data.empty:
                 combined_data = pd.concat([devices_data, excel_data], ignore_index=True)
             else:
@@ -785,7 +786,7 @@ class DeviceInventoryApp:
             if 'Source' not in combined_data.columns:
                 combined_data['Source'] = 'Cloud'
 
-            # Identify records in the database but not in the latest Excel data and update Source to "Local"
+            # Identify records in the database but not in the latest CSV data and update Source to "Local"
             latest_records = set(zip(excel_data['SerialNumber'].str.strip().str.lower(), excel_data['DeviceName'].str.strip().str.lower()))
             combined_data['SerialNumber_lower'] = combined_data['SerialNumber'].str.strip().str.lower()
             combined_data['DeviceName_lower'] = combined_data['DeviceName'].str.strip().str.lower()
@@ -863,15 +864,15 @@ class DeviceInventoryApp:
             progress_window.destroy()
 
     def load_data_for_refresh(self):        
-        file_path = r"DeviceInventory.xlsx"
+        file_path = r"DeviceInventory.csv"
         try:
             # Step 1: Load data from the Devices table in the database
             with sqlite3.connect('inventory.db', timeout=30) as conn:
                 devices_data = pd.read_sql_query("SELECT * FROM Devices", conn)
                 devices_data = devices_data.fillna("")
 
-            # Step 2: Load data from Excel file
-            excel_data = pd.read_excel(file_path)
+            # Step 2: Load data from CSV file
+            excel_data = pd.read_csv(file_path)
             excel_data.dropna(subset=['DeviceName', 'SerialNumber'], how='all', inplace=True)
             excel_data = excel_data.fillna("")
 
@@ -888,7 +889,7 @@ class DeviceInventoryApp:
             if 'Remarks' not in devices_data.columns:
                 devices_data['Remarks'] = ""
 
-            # Combine data from Devices table and Excel data
+            # Combine data from Devices table and CSV data
             if not devices_data.empty and not excel_data.empty:
                 combined_data = pd.concat([devices_data, excel_data], ignore_index=True)
             else:
@@ -1075,22 +1076,7 @@ class DeviceInventoryApp:
             columns_mapping = {col: idx for idx, col in enumerate(self.tree["columns"])}
             device_name = str(item_values[columns_mapping["DeviceName"]])  
             serial_number = str(item_values[columns_mapping["SerialNumber"]])  
-
-            # Retrieve DeviceID from the database
-            self.cursor.execute("SELECT EntraDeviceID FROM Devices WHERE DeviceName = ? AND SerialNumber = ?", (device_name, serial_number))
-            result = self.cursor.fetchone()
-            if result:
-                entra_device_id = result[0]
-            else:
-                messagebox.showerror("Error", "Entra Device ID not found for the selected device.")
-
-            self.cursor.execute("SELECT IntuneDeviceID FROM Devices WHERE DeviceName = ? AND SerialNumber = ?", (device_name, serial_number))
-            result = self.cursor.fetchone()
-            if result:
-                intune_device_id = result[0]
-            else:
-                messagebox.showerror("Error", "Intune Device ID not found for the selected device.")    
-
+            print("serial_number: " + serial_number)
             try:
                 # Authenticate and get the access token
                 access_token = self.get_access_token()
@@ -1099,135 +1085,148 @@ class DeviceInventoryApp:
                     'Content-Type': 'application/json'
                 }
 
-                # Retrieve device details from Microsoft Graph API
-                device_url = f"https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/{intune_device_id}"
-                response = requests.get(device_url, headers=headers, verify=False, proxies=self.PROXIES)
-                print("Intune Device Info Retrieved")
-                if response.status_code == 200:
-                    device_data = response.json()
-                    total_storage = device_data.get('totalStorageSpaceInBytes', '')
-                    free_storage = device_data.get('freeStorageSpaceInBytes', '')
+                serial_number_url = f"https://graph.microsoft.com/v1.0/deviceManagement/managedDevices?$filter=serialNumber eq '{serial_number}'"
+                serial_number_response = requests.get(serial_number_url, headers=headers, verify=False, proxies=self.PROXIES)
 
-                    # Convert to GB and round to the nearest integer if the value is not 'N/A'
-                    total_storage_gb = str(int(round(total_storage / (1024 ** 3))) if isinstance(total_storage, (int, float)) and total_storage != '' else '')
-                    free_storage_gb = str(int(round(free_storage / (1024 ** 3))) if isinstance(free_storage, (int, float)) and free_storage != '' else '')
-                    print("Total Storage: " + total_storage_gb)
-                    print("Total Storage: " + free_storage_gb)
-                    updated_values = {
-                        "OperatingSystem": device_data.get("operatingSystem", ""),
-                        "OSVersion": device_data.get("osVersion", ""),
-                        "ComplianceState": device_data.get("complianceState", ""),
-                        "Manufacturer": device_data.get("manufacturer", ""),
-                        "Model": device_data.get("model", ""),
-                        "IntuneLastSync": device_data.get("lastSyncDateTime", ""),                
-                        'EntraDeviceID': device_data.get('EntraDeviceID', ""),
-                        'IntuneDeviceID': device_data.get('IntuneDeviceID', ""),
-                        'UserPrincipalName': device_data.get('UserPrincipalName', ""),                        
-                        'MAC': device_data.get('MAC', ""),                        
-                        'ReportTime': time.strftime("%Y-%m-%d %H:%M:%S"),
-                        'Source': "Cloud",
-                        'Encryption': device_data.get('Encryption', ""),                        
-                        'TotalStorage': total_storage_gb,
-                        'FreeStorage': free_storage_gb
-                    }
+                if serial_number_response.status_code == 200:
+                    response_data = serial_number_response.json()
+                    serial_number_data = response_data["value"][0]
+                    intune_device_id = serial_number_data.get('id', '')
+                    entra_device_id = serial_number_data.get('azureADDeviceId', '')
+                    print("Intune Device ID Retrieved: " + intune_device_id)
+                    print("Entra Device ID Retrieved: " + entra_device_id)
+                    # Retrieve device details from Microsoft Graph API
+                    device_url = f"https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/{intune_device_id}"
+                    response = requests.get(device_url, headers=headers, verify=False, proxies=self.PROXIES)
+                    print("Intune Device Info Retrieved")
+                    if response.status_code == 200:
+                        device_data = response.json()
+                        total_storage = device_data.get('totalStorageSpaceInBytes', '')
+                        free_storage = device_data.get('freeStorageSpaceInBytes', '')
 
-                    # Retrieve physical memory details from the separate API
-                    memory_url = f"https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/{intune_device_id}?$select=physicalMemoryInBytes"
-                    memory_response = requests.get(memory_url, headers=headers, verify=False, proxies=self.PROXIES)
-                    print("Device Memory Info Retrieved")
-                    if memory_response.status_code == 200:
-                        memory_data = memory_response.json()
-                        physical_memory = memory_data.get("physicalMemoryInBytes", 0)
-                        physical_memory_gb = str(int(round(physical_memory / (1024 ** 3))) if isinstance(physical_memory, (int, float)) and physical_memory != '' else '')
-                        updated_values["PhysicalMemory"] = physical_memory_gb
-                    else:
-                        updated_values["PhysicalMemory"] = ""
+                        # Convert to GB and round to the nearest integer if the value is not 'N/A'
+                        total_storage_gb = str(int(round(total_storage / (1024 ** 3))) if isinstance(total_storage, (int, float)) and total_storage != '' else '')
+                        free_storage_gb = str(int(round(free_storage / (1024 ** 3))) if isinstance(free_storage, (int, float)) and free_storage != '' else '')
+                        print("Total Storage: " + total_storage_gb)
+                        print("Total Storage: " + free_storage_gb)
+                        updated_values = {
+                            "OperatingSystem": device_data.get("operatingSystem", ""),
+                            "OSVersion": device_data.get("osVersion", ""),
+                            "ComplianceState": device_data.get("complianceState", ""),
+                            "Manufacturer": device_data.get("manufacturer", ""),
+                            "Model": device_data.get("model", ""),
+                            "IntuneLastSync": device_data.get("lastSyncDateTime", ""),                
+                            'EntraDeviceID': device_data.get('azureADDeviceId', ""),
+                            'IntuneDeviceID': device_data.get('id', ""),
+                            'UserPrincipalName': device_data.get('userPrincipalName', ""),                        
+                            'MAC': device_data.get('wiFiMacAddress', ""),                        
+                            'ReportTime': time.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                            'Source': "Cloud",
+                            'Encryption': device_data.get('Encryption', ""),                        
+                            'TotalStorage': total_storage_gb,
+                            'FreeStorage': free_storage_gb
+                        }
 
-                    # Retrieve user details
-                    user_principal_name = device_data.get("userPrincipalName", "")
-                    if user_principal_name:
-                        user_url = f"https://graph.microsoft.com/v1.0/users/{user_principal_name}?$select=displayName,jobTitle,department,city,country"
-                        user_response = requests.get(user_url, headers=headers, verify=False, proxies=self.PROXIES)
-                        print("User Info Retrieved")
-                        if user_response.status_code == 200:
-                            user_data = user_response.json()
-                            updated_values.update({
-                                "UserDisplayName": user_data.get("displayName", ""),
-                                "JobTitle": user_data.get("jobTitle", ""),
-                                "Department": user_data.get("department", ""),
-                                "City": user_data.get("city", ""),
-                                "Country": user_data.get("country", "")
-                            })
-
-                    # Retrieve Entra device details for trustType
-                    entra_device_url = f"https://graph.microsoft.com/v1.0/devices?$filter=deviceId eq '{entra_device_id}'&$select=trustType"
-                    entra_response = requests.get(entra_device_url, headers=headers, verify=False, proxies=self.PROXIES)
-                    print("Entra Device Info Retrieved")
-                    if entra_response.status_code == 200:
-                        entra_data = entra_response.json().get("value", [])
-                        if entra_data:
-                            updated_values["TrustType"] = entra_data[0].get("trustType", "")
+                        # Retrieve physical memory details from the separate API
+                        memory_url = f"https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/{intune_device_id}?$select=physicalMemoryInBytes"
+                        memory_response = requests.get(memory_url, headers=headers, verify=False, proxies=self.PROXIES)
+                        print("Device Memory Info Retrieved")
+                        if memory_response.status_code == 200:
+                            memory_data = memory_response.json()
+                            physical_memory = memory_data.get("physicalMemoryInBytes", 0)
+                            physical_memory_gb = str(int(round(physical_memory / (1024 ** 3))) if isinstance(physical_memory, (int, float)) and physical_memory != '' else '')
+                            updated_values["PhysicalMemory"] = physical_memory_gb
                         else:
-                            updated_values["TrustType"] = ""
+                            updated_values["PhysicalMemory"] = ""
 
-                    # Update the database
-                    self.cursor.execute('''UPDATE Devices SET 
-                                            OperatingSystem = ?,
-                                            OSVersion = ?,
-                                            ComplianceState = ?,
-                                            Manufacturer = ?,
-                                            Model = ?,
-                                            IntuneLastSync = ?,
-                                            EntraDeviceID = ?,
-                                            IntuneDeviceID = ?,
-                                            UserPrincipalName = ?,
-                                            MAC = ?,
-                                            ReportTime = ?,
-                                            TotalStorage = ?,
-                                            FreeStorage = ?,
-                                            PhysicalMemory = ?,
-                                            UserDisplayName = ?,
-                                            JobTitle = ?,
-                                            Department = ?,
-                                            City = ?,
-                                            Country = ?,
-                                            TrustType = ?
-                                            WHERE DeviceName = ? AND SerialNumber = ?''',
-                                        (
-                                            updated_values.get("OperatingSystem", ""),
-                                            updated_values.get("OSVersion", ""),
-                                            updated_values.get("ComplianceState", ""),
-                                            updated_values.get("Manufacturer", ""),
-                                            updated_values.get("Model", ""),
-                                            updated_values.get("IntuneLastSync", ""),
-                                            updated_values.get("EntraDeviceID", ""),
-                                            updated_values.get("IntuneDeviceID", ""),
-                                            updated_values.get("UserPrincipalName", ""),
-                                            updated_values.get("MAC", ""),
-                                            updated_values.get("ReportTime", ""),
-                                            updated_values.get("TotalStorage", ""),
-                                            updated_values.get("FreeStorage", ""),
-                                            updated_values.get("PhysicalMemory", ""),
-                                            updated_values.get("UserDisplayName", ""),
-                                            updated_values.get("JobTitle", ""),
-                                            updated_values.get("Department", ""),
-                                            updated_values.get("City", ""),
-                                            updated_values.get("Country", ""),
-                                            updated_values.get("TrustType", ""),
-                                            device_name,
-                                            serial_number
-                                        ))
-                    self.conn.commit()
-                    print("Device Info Written")
-                    # Update the data in the TreeView
-                    for col, idx in columns_mapping.items():
-                        if col in updated_values:
-                            self.tree.set(selected_item, column=col, value=updated_values[col])
+                        # Retrieve user details
+                        user_principal_name = device_data.get("userPrincipalName", "")
+                        if user_principal_name:
+                            user_url = f"https://graph.microsoft.com/v1.0/users/{user_principal_name}?$select=displayName,jobTitle,department,city,country"
+                            user_response = requests.get(user_url, headers=headers, verify=False, proxies=self.PROXIES)
+                            print("User Info Retrieved")
+                            if user_response.status_code == 200:
+                                user_data = user_response.json()
+                                updated_values.update({
+                                    "UserDisplayName": user_data.get("displayName", ""),
+                                    "JobTitle": user_data.get("jobTitle", ""),
+                                    "Department": user_data.get("department", ""),
+                                    "City": user_data.get("city", ""),
+                                    "Country": user_data.get("country", "")
+                                })
 
-                    messagebox.showinfo("Success", "Device information updated successfully.")
+                        # Retrieve Entra device details for trustType
+                        entra_device_url = f"https://graph.microsoft.com/v1.0/devices?$filter=deviceId eq '{entra_device_id}'&$select=trustType"
+                        entra_response = requests.get(entra_device_url, headers=headers, verify=False, proxies=self.PROXIES)
+                        print("Entra Device Info Retrieved")
+                        if entra_response.status_code == 200:
+                            entra_data = entra_response.json().get("value", [])
+                            if entra_data:
+                                updated_values["TrustType"] = entra_data[0].get("trustType", "")
+                            else:
+                                updated_values["TrustType"] = ""
 
+                        # Update the database
+                        self.cursor.execute('''UPDATE Devices SET 
+                                                OperatingSystem = ?,
+                                                OSVersion = ?,
+                                                ComplianceState = ?,
+                                                Manufacturer = ?,
+                                                Model = ?,
+                                                IntuneLastSync = ?,
+                                                EntraDeviceID = ?,
+                                                IntuneDeviceID = ?,
+                                                UserPrincipalName = ?,
+                                                MAC = ?,
+                                                ReportTime = ?,
+                                                TotalStorage = ?,
+                                                FreeStorage = ?,
+                                                PhysicalMemory = ?,
+                                                UserDisplayName = ?,
+                                                JobTitle = ?,
+                                                Department = ?,
+                                                City = ?,
+                                                Country = ?,
+                                                TrustType = ?,
+                                                Source = ?
+                                                WHERE DeviceName = ? AND SerialNumber = ?''',
+                                            (
+                                                updated_values.get("OperatingSystem", ""),
+                                                updated_values.get("OSVersion", ""),
+                                                updated_values.get("ComplianceState", ""),
+                                                updated_values.get("Manufacturer", ""),
+                                                updated_values.get("Model", ""),
+                                                updated_values.get("IntuneLastSync", ""),
+                                                updated_values.get("EntraDeviceID", ""),
+                                                updated_values.get("IntuneDeviceID", ""),
+                                                updated_values.get("UserPrincipalName", ""),
+                                                updated_values.get("MAC", ""),
+                                                updated_values.get("ReportTime", ""),
+                                                updated_values.get("TotalStorage", ""),
+                                                updated_values.get("FreeStorage", ""),
+                                                updated_values.get("PhysicalMemory", ""),
+                                                updated_values.get("UserDisplayName", ""),
+                                                updated_values.get("JobTitle", ""),
+                                                updated_values.get("Department", ""),
+                                                updated_values.get("City", ""),
+                                                updated_values.get("Country", ""),
+                                                updated_values.get("TrustType", ""),
+                                                "Cloud",
+                                                device_name,
+                                                serial_number
+                                            ))
+                        self.conn.commit()
+                        print("Device Info Written")
+                        # Update the data in the TreeView
+                        for col, idx in columns_mapping.items():
+                            if col in updated_values:
+                                self.tree.set(selected_item, column=col, value=updated_values[col])
+
+                        messagebox.showinfo("Success", "Device information updated successfully.")
+                    else:
+                        messagebox.showerror("Error", f"Failed to retrieve Intune device ID. Status code: {response.status_code}, Response: {response.text}") 
                 else:
-                    messagebox.showerror("Error", f"Failed to refresh device information. Status code: {response.status_code}, Response: {response.text}")
+                    messagebox.showerror("Error", f"Failed to refresh device information. Status code: {serial_number_response.status_code}, Response: {serial_number_response.text}")
 
             except Exception as e:
                 messagebox.showerror("Error", f"An error occurred while refreshing device information: {str(e)}")
@@ -1273,99 +1272,115 @@ class DeviceInventoryApp:
             print(f"Exception occurred while retrieving user details: {str(e)}")
         
     def export_to_database(self):
-        # File names
-        intune_file = "IntuneDeviceReport.xlsx"
-        entra_file = "EntraDeviceReport.xlsx"
-        user_file = "UserReport.xlsx"
+        # Step 1: Execute the PowerShell script to generate new report files
+        script_path = "GetIntuneDevices.ps1"
+        powershell_command = f"powershell.exe -ExecutionPolicy Bypass -File {script_path}"
 
-        # Check if all files exist
-        if not all(os.path.exists(file) for file in [intune_file, entra_file, user_file]):
-            raise FileNotFoundError("One or more required files are missing.")
+        # Run the PowerShell script
+        process = subprocess.Popen(
+            powershell_command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=True
+        )
+        stdout, stderr = process.communicate()
 
-        # Load the reports into DataFrames
-        intune_df = pd.read_excel(intune_file).fillna("")
-        entra_df = pd.read_excel(entra_file).fillna("")
-        user_df = pd.read_excel(user_file).fillna("")
+        if process.returncode != 0:
+            raise Exception(f"PowerShell script execution failed: {stderr.decode('utf-8')}")
+        else: 
+            # File names
+            intune_csv = "IntuneDeviceReport.csv"
+            entra_device_csv = "EntraDeviceReport.csv"
+            user_csv = "UserReport.csv"
 
-        # Ensure proper column naming for consistency
-        intune_columns = [
-            "DeviceName", "UserPrincipalName", "EntraDeviceID", "IntuneDeviceID", "OperatingSystem", "OSVersion", 
-            "ComplianceState", "Model", "Manufacturer", "SerialNumber", "MAC", "IntuneLastSync", "Encryption", 
-            "TotalStorage", "FreeStorage", 'PhysicalMemory', "Source", "Remarks"
-        ]
-        entra_columns = ["DeviceName", "EntraDeviceID", "TrustType"]
-        user_columns = ["UPN", "UserDisplayName", "JobTitle", "Department", "City", "Country"]
+            # Check if all files exist
+            if not all(os.path.exists(file) for file in [intune_csv, entra_device_csv, user_csv]):
+                raise FileNotFoundError("One or more required files are missing.")
 
-        intune_df.columns = intune_columns
-        entra_df.columns = entra_columns
-        user_df.columns = user_columns
+            # Load the reports into DataFrames
+            intune_df = pd.read_csv(intune_csv).fillna("")
+            entra_df = pd.read_csv(entra_device_csv).fillna("")
+            user_df = pd.read_csv(user_csv).fillna("")
 
-        # Merge data
-        merged_df = intune_df.merge(entra_df, on=["DeviceName", "EntraDeviceID"], how="left")
-        merged_df = merged_df.merge(user_df, left_on="UserPrincipalName", right_on="UPN", how="left")
+            # Ensure proper column naming for consistency
+            intune_columns = [
+                "DeviceName", "UserPrincipalName", "EntraDeviceID", "IntuneDeviceID", "OperatingSystem", "OSVersion", 
+                "ComplianceState", "Model", "Manufacturer", "SerialNumber", "MAC", "IntuneLastSync", "Encryption", 
+                "TotalStorage", "FreeStorage", 'PhysicalMemory', "Source", "Remarks"
+            ]
+            entra_columns = ["DeviceName", "EntraDeviceID", "TrustType"]
+            user_columns = ["UPN", "UserDisplayName", "JobTitle", "Department", "City", "Country"]
 
-        # Prepare data for the Devices table
-        devices_data = []
-        for _, row in merged_df.iterrows():
-            # Check if UserPrincipalName is empty
-            if not row['UserPrincipalName']:
-                user_display_name = ""
-                job_title = ""
-                department = ""
-                city = ""
-                country = ""
-            else:
-                user_display_name = row['UserDisplayName']
-                job_title = row['JobTitle']
-                department = row['Department']
-                city = row['City']
-                country = row['Country']
-            # Convert TotalStorage, FreeStorage, and PhysicalMemory from bytes to GB
-            total_storage = row['TotalStorage']
-            free_storage = row['FreeStorage']
+            intune_df.columns = intune_columns
+            entra_df.columns = entra_columns
+            user_df.columns = user_columns
 
-            # Convert to GB and round to the nearest integer if the value is not 'N/A'
-            total_storage_gb = int(round(total_storage / (1024 ** 3))) if isinstance(total_storage, (int, float)) and total_storage != '' else ''
-            free_storage_gb = int(round(free_storage / (1024 ** 3))) if isinstance(free_storage, (int, float)) and free_storage != '' else ''
-            device_data = {
-                'DeviceName': str(row['DeviceName']),
-                'SerialNumber': str(row['SerialNumber']),
-                'EntraDeviceID': str(row['EntraDeviceID']),
-                'IntuneDeviceID': str(row['IntuneDeviceID']),
-                'UserPrincipalName': str(row['UserPrincipalName']),
-                'OperatingSystem': str(row['OperatingSystem']),
-                'OSVersion': str(row['OSVersion']),
-                'ComplianceState': str(row['ComplianceState']),
-                'Model': str(row['Model']),
-                'Manufacturer': str(row['Manufacturer']),
-                'MAC': str(row['MAC']),
-                'IntuneLastSync': str(row['IntuneLastSync']),
-                'ReportTime': time.strftime("%Y-%m-%d %H:%M:%S"),
-                'Source': str(row['Source']),
-                'Encryption': str(row['Encryption']),
-                'UserDisplayName': user_display_name,
-                'JobTitle': job_title,
-                'Department': department,
-                'City': city,
-                'Country': country,
-                'TrustType': str(row['TrustType']),
-                'TotalStorage': total_storage_gb,
-                'FreeStorage': free_storage_gb,
-                'PhysicalMemory': str(row['PhysicalMemory']),
-                'Remarks': str(row['Remarks'])
-            }
+            # Merge data
+            merged_df = intune_df.merge(entra_df, on=["DeviceName", "EntraDeviceID"], how="left")
+            merged_df = merged_df.merge(user_df, left_on="UserPrincipalName", right_on="UPN", how="left")
 
-            # Skip empty records
-            if not any(device_data.values()):
-                continue
+            # Prepare data for the Devices table
+            devices_data = []
+            for _, row in merged_df.iterrows():
+                # Check if UserPrincipalName is empty
+                if not row['UserPrincipalName']:
+                    user_display_name = ""
+                    job_title = ""
+                    department = ""
+                    city = ""
+                    country = ""
+                else:
+                    user_display_name = row['UserDisplayName']
+                    job_title = row['JobTitle']
+                    department = row['Department']
+                    city = row['City']
+                    country = row['Country']
+                # Convert TotalStorage, FreeStorage, and PhysicalMemory from bytes to GB
+                total_storage = row['TotalStorage']
+                free_storage = row['FreeStorage']
 
-            devices_data.append(device_data)
+                # Convert to GB and round to the nearest integer if the value is not 'N/A'
+                total_storage_gb = int(round(total_storage / (1024 ** 3))) if isinstance(total_storage, (int, float)) and total_storage != '' else ''
+                free_storage_gb = int(round(free_storage / (1024 ** 3))) if isinstance(free_storage, (int, float)) and free_storage != '' else ''
+                device_data = {
+                    'DeviceName': str(row['DeviceName']),
+                    'SerialNumber': str(row['SerialNumber']),
+                    'EntraDeviceID': str(row['EntraDeviceID']),
+                    'IntuneDeviceID': str(row['IntuneDeviceID']),
+                    'UserPrincipalName': str(row['UserPrincipalName']),
+                    'OperatingSystem': str(row['OperatingSystem']),
+                    'OSVersion': str(row['OSVersion']),
+                    'ComplianceState': str(row['ComplianceState']),
+                    'Model': str(row['Model']),
+                    'Manufacturer': str(row['Manufacturer']),
+                    'MAC': str(row['MAC']),
+                    'IntuneLastSync': str(row['IntuneLastSync']),
+                    'ReportTime': time.strftime("%Y-%m-%d %H:%M:%S"),
+                    'Source': str(row['Source']),
+                    'Encryption': str(row['Encryption']),
+                    'UserDisplayName': user_display_name,
+                    'JobTitle': job_title,
+                    'Department': department,
+                    'City': city,
+                    'Country': country,
+                    'TrustType': str(row['TrustType']),
+                    'TotalStorage': total_storage_gb,
+                    'FreeStorage': free_storage_gb,
+                    'PhysicalMemory': str(row['PhysicalMemory']),
+                    'Remarks': str(row['Remarks'])
+                }
+
+                # Skip empty records
+                if not any(device_data.values()):
+                    continue
+
+                devices_data.append(device_data)
 
         # Convert the selected device data to a DataFrame and save as an Excel file
         if devices_data:
             df = pd.DataFrame(devices_data)
             df.fillna('', inplace=True)
-            df.to_excel('DeviceInventory.xlsx', index=False)
+            df.to_csv('DeviceInventory.csv', index=False)
 
             # Write the data to the SQLite database
             with sqlite3.connect('inventory.db', timeout=30) as conn:
@@ -1548,7 +1563,7 @@ class DeviceInventoryApp:
 
     def download_template(self):
         # Prompt user to choose save location for the template
-        file_path = filedialog.asksaveasfilename(defaultextension=".xlsx", initialfile="Device inventory template", filetypes=[("Excel files", "*.xlsx")])
+        file_path = filedialog.asksaveasfilename(defaultextension=".csv", initialfile="Device inventory template", filetypes=[("csv files", "*.csv")])
         if file_path:
             try:
                 # Retrieve the headers from the Devices table
@@ -1558,19 +1573,19 @@ class DeviceInventoryApp:
                 ]
                 # Create an empty DataFrame with the column headers
                 df = pd.DataFrame(columns=columns)
-                # Write the DataFrame to the Excel file
-                df.to_excel(file_path, index=False)
+                # Write the DataFrame to the CSV file
+                df.to_csv(file_path, index=False)
                 messagebox.showinfo("Success", "Template downloaded successfully.")
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to download template: {e}")
 
     def upload_data(self):
-        # Prompt user to choose an Excel file to upload
-        file_path = filedialog.askopenfilename(filetypes=[("Excel files", "*.xlsx")])
+        # Prompt user to choose an CSV file to upload
+        file_path = filedialog.askopenfilename(filetypes=[("CSV files", "*.csv")])
         if file_path:
             try:
-                # Load data from the selected Excel file
-                new_data = pd.read_excel(file_path).fillna("")
+                # Load data from the selected CSV file
+                new_data = pd.read_csv(file_path, dtype=str).fillna("")
 
                 # Check for illegal columns
                 expected_columns = [
@@ -1594,27 +1609,55 @@ class DeviceInventoryApp:
                 current_time = time.strftime("%Y-%m-%d %H:%M:%S")
                 new_data["ReportTime"] = current_time
 
+                # Initialize lists to track duplicates and imported records
+                duplicate_records = []
+                imported_records = []
+
                 # Insert data into Devices table
                 with sqlite3.connect('inventory.db', timeout=30) as conn:
                     cursor = conn.cursor()
 
-                    for _, row in new_data.iterrows():                                               
-                        # Insert or replace the record into Devices table
-                        cursor.execute('''REPLACE INTO Devices (DeviceName, SerialNumber, ReportTime, 'OperatingSystem', 'OSVersion', 
-                                       'Manufacturer', 'Model', 'TotalStorage', 
-                                        'PhysicalMemory', 'UserPrincipalName', 'UserDisplayName', 'Department', 'Country', 'City')
-                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                                        (row['DeviceName'], row['SerialNumber'], row['ReportTime'], row['OperatingSystem'], row['OSVersion'],
-                                         row['Manufacturer'], row['Model'], row['TotalStorage'], row['PhysicalMemory'], row['UserPrincipalName'],
-                                         row['UserDisplayName'], row['Department'], row['Country'], row['City']))
-                        
-                        if not pd.isna(row['PhysicalMemory']) and not row['PhysicalMemory'] == "":
-                            cursor.execute('''REPLACE INTO Memory (DeviceName, SerialNumber, 'PhysicalMemory')
-                                            VALUES (?, ?, ?)''',
-                                            (row['DeviceName'], row['SerialNumber'], row['PhysicalMemory']))
+                    for _, row in new_data.iterrows():
+                        device_name = str(row['DeviceName']).strip().lower()
+                        serial_number = str(row['SerialNumber']).strip().lower()
+
+                        # Check if the record already exists in the database
+                        cursor.execute(
+                            "SELECT 1 FROM Devices WHERE LOWER(DeviceName) = ? AND LOWER(SerialNumber) = ?",
+                            (device_name, serial_number)
+                        )
+                        if cursor.fetchone():
+                            duplicate_records.append((device_name, serial_number))
+                        else:
+                            imported_records.append(row)
+                            # Insert or replace the record into Devices table
+                            cursor.execute('''REPLACE INTO Devices (DeviceName, SerialNumber, ReportTime, 'OperatingSystem', 'OSVersion', 
+                                        'Manufacturer', 'Model', 'TotalStorage', 'Source'
+                                            'PhysicalMemory', 'UserPrincipalName', 'UserDisplayName', 'Department', 'Country', 'City')
+                                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                                            (row['DeviceName'], row['SerialNumber'], row['ReportTime'], row['OperatingSystem'], row['OSVersion'],
+                                            row['Manufacturer'], row['Model'], row['TotalStorage'], 'Local', row['PhysicalMemory'], row['UserPrincipalName'],
+                                            row['UserDisplayName'], row['Department'], row['Country'], row['City']))
+                            
+                            if not pd.isna(row['PhysicalMemory']) and not row['PhysicalMemory'] == "":
+                                cursor.execute('''REPLACE INTO Memory (DeviceName, SerialNumber, 'PhysicalMemory')
+                                                VALUES (?, ?, ?)''',
+                                                (row['DeviceName'], row['SerialNumber'], row['PhysicalMemory']))
 
                     conn.commit()
-                messagebox.showinfo("Success", "Data uploaded successfully.") 
+                # Display summary to the user
+                if duplicate_records:
+                    messagebox.showinfo(
+                        "Import Summary",
+                        f"Import completed.\n\n"
+                        f"Records imported: {len(imported_records)}\n"
+                        f"Duplicates omitted: {len(duplicate_records)}\n"
+                        f"\nDuplicate records:\n" +
+                        "\n".join([f"DeviceName: {d[0]}, SerialNumber: {d[1]}" for d in duplicate_records[:10]]) +
+                        ("\n... (more)" if len(duplicate_records) > 10 else "")
+                    )
+                else:
+                    messagebox.showinfo("Import Summary", f"Import completed.\nAll records imported: {len(imported_records)}")
                 self.load_data()
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to upload data: {e}")
@@ -1758,7 +1801,7 @@ class DeviceInventoryApp:
             self.root.minsize(width=total_width, height=600)
             self.root.geometry(f"{total_width}x600") 
 
-            # Load Excel data automatically
+            # Load CSV data automatically
             self.load_software_data()
 
             # Update the display
@@ -1967,7 +2010,7 @@ class DeviceInventoryApp:
             self.root.minsize(width=total_width, height=600)
             self.root.geometry(f"{total_width}x600") 
 
-            # Load Excel data automatically
+            # Load CSV data automatically
             self.load_data()
 
             # Update the display
@@ -2018,6 +2061,11 @@ class DeviceInventoryApp:
 
         # Update the Treeview with selected columns
         self.update_treeview_columns()
+
+    def update_treeview(self, data):
+        self.tree.delete(*self.tree.get_children())  # Clear the treeview
+        for _, row in data.iterrows():
+            self.tree.insert("", "end", values=row.tolist())
 
     def adjust_window_width(self):
         # Calculate the total width required based on the current columns
@@ -2207,14 +2255,15 @@ class DeviceInventoryApp:
         self.operator_combobox.set("AND")
 
     def run_refresh_data(self, progress_window, progress, *args):
-        file_path = r"DeviceInventory.xlsx"
         try:
-            # Export the retrieved device information to the database
-            self.export_to_database()                
-            new_data = pd.read_excel(file_path).fillna("")  # Ensure no NaN values
-            #new_data.dropna(subset=['DeviceName', 'SerialNumber'], how='all', inplace=True)
+            # Regenerate DeviceInventory.csv using export_to_database function
+            self.export_to_database()  # Ensure it uses the newly generated Excel files
 
-            # Create a new SQLite connection for this thread
+            # Load new data from DeviceInventory.csv
+            new_data = pd.read_csv("DeviceInventory.csv").fillna("")  # Ensure no NaN values
+            new_data.dropna(subset=['DeviceName', 'SerialNumber'], how='all', inplace=True)
+
+            # Prepare SQLite connection for updating the database
             with sqlite3.connect('inventory.db', timeout=10) as thread_conn:
                 thread_cursor = thread_conn.cursor()
 
@@ -2268,7 +2317,7 @@ class DeviceInventoryApp:
                                             report_time_str, new_row['Encryption'], new_row['UserDisplayName'], new_row['JobTitle'], new_row['Department'], 
                                             new_row['City'], new_row['Country'], new_row['TrustType'], new_row['TotalStorage'], new_row['FreeStorage'], new_row['PhysicalMemory']))
 
-                # Step: Identify records in the database but not in the latest Excel data and update Source to "Local"                
+                # Step: Identify records in the database but not in the latest CSV data and update Source to "Local"                
                 thread_cursor.execute("SELECT SerialNumber, DeviceName, Source FROM Devices")
                 all_db_records = thread_cursor.fetchall()
 
@@ -2534,6 +2583,9 @@ class DeviceInventoryApp:
                     
                     # Display data with the currently selected columns maintained
                     self.display_data(self.filtered_data)
+
+                    # Update the page number label
+                    self.update_page_number_label()
                 except Exception as e:
                     messagebox.showerror("Error", f"Failed to sort data: {e}")
     
@@ -2561,6 +2613,9 @@ class DeviceInventoryApp:
                     
                     # Display data with the currently selected columns maintained
                     self.display_software_data(self.software_filtered_data)
+
+                    # Update the page number label
+                    self.update_page_number_label()
                 except Exception as e:
                     messagebox.showerror("Error", f"Failed to sort data: {e}")
 
@@ -2568,7 +2623,32 @@ class DeviceInventoryApp:
         # Get the selected item
         item_id = self.tree.identify_row(event.y)
         if item_id:
+            # Set the selected item in the tree
             self.tree.selection_set(item_id)
+            
+            # Retrieve item values
+            item_values = self.tree.item(item_id, "values")
+            columns_mapping = {col: idx for idx, col in enumerate(self.tree["columns"])}
+
+            # Check if the "Source" column exists and get its value
+            source_column_index = columns_mapping.get("Source")
+            if source_column_index is not None:
+                source_value = item_values[source_column_index].strip().lower()
+                if source_value == "local":
+                    self.context_menu.entryconfig("Refresh", state="disabled")
+                else:
+                    self.context_menu.entryconfig("Refresh", state="normal")
+            
+            # Check if the "Encryption" column exists and get its value
+            encryption_column_index = columns_mapping.get("Encryption")
+            if encryption_column_index is not None:
+                encryption_value = item_values[encryption_column_index]
+                if str(encryption_value).lower() in ["false", "0", "no", "n"]:
+                    self.context_menu.entryconfig("BitLocker Keys", state="disabled")
+                else:
+                    self.context_menu.entryconfig("BitLocker Keys", state="normal")
+            
+            # Display the context menu
             self.context_menu.post(event.x_root, event.y_root)
 
     def show_software_context_menu(self, event):
