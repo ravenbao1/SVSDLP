@@ -36,7 +36,7 @@ class DeviceInventoryApp:
             self.session.proxies.clear()
 
         # Intune Graph API credentials
-
+        
         self.authority = f"https://login.microsoftonline.com/{self.tenant_id}"
         self.scope = ["User.Read"]
 
@@ -1188,6 +1188,7 @@ class DeviceInventoryApp:
                                                 City = ?,
                                                 Country = ?,
                                                 TrustType = ?,
+                                                Encryption = ?,
                                                 Source = ?
                                                 WHERE DeviceName = ? AND SerialNumber = ?''',
                                             (
@@ -1211,6 +1212,7 @@ class DeviceInventoryApp:
                                                 updated_values.get("City", ""),
                                                 updated_values.get("Country", ""),
                                                 updated_values.get("TrustType", ""),
+                                                updated_values.get("Encryption", ""),
                                                 "Cloud",
                                                 device_name,
                                                 serial_number
@@ -1486,6 +1488,7 @@ class DeviceInventoryApp:
                         for key in recovery_keys:
                             if key.get('deviceId', '').lower() == device_id.lower():
                                 bitlocker_key_id = key.get('id')
+                                print("BitlockerKey ID: " + bitlocker_key_id)
                                 break
 
                         if bitlocker_key_id:
@@ -1497,7 +1500,7 @@ class DeviceInventoryApp:
                                 key_data = key_response.json()
                                 recovery_key = key_data.get('key')
                                 backup_time = key_data.get('createdDateTime', 'N/A')
-
+                                print("BitlockerKey: " + recovery_key)
                                 with sqlite3.connect('inventory.db', timeout=30) as conn:
                                     cursor = conn.cursor()
                                     cursor.execute('''REPLACE INTO BitLockerKeys (DeviceName, SerialNumber, KeyID, RecoveryKey, BackupTime) 
