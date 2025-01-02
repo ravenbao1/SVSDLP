@@ -36,12 +36,15 @@ class DeviceInventoryApp:
             self.session.proxies.clear()
 
         # Intune Graph API credentials
-        
+
         self.authority = f"https://login.microsoftonline.com/{self.tenant_id}"
         self.scope = ["User.Read"]
 
         # Initialize SQLite database and GUI components after authentication
         self.initialize_main_application()        
+
+        # Initialize column_widths to track custom column widths
+        self.column_widths = {}
 
         # Bind the configure event to track window state changes
         self.root.bind("<Configure>", self.on_window_configure)
@@ -1103,12 +1106,18 @@ class DeviceInventoryApp:
                         device_data = response.json()
                         total_storage = device_data.get('totalStorageSpaceInBytes', '')
                         free_storage = device_data.get('freeStorageSpaceInBytes', '')
-
+                        encryption = device_data.get('isEncrypted', '')
+                        print(encryption)
+                        if encryption == 'True':
+                            encryption = "True"
+                        else:
+                            encryption = 'False'
                         # Convert to GB and round to the nearest integer if the value is not 'N/A'
                         total_storage_gb = str(int(round(total_storage / (1024 ** 3))) if isinstance(total_storage, (int, float)) and total_storage != '' else '')
                         free_storage_gb = str(int(round(free_storage / (1024 ** 3))) if isinstance(free_storage, (int, float)) and free_storage != '' else '')
                         print("Total Storage: " + total_storage_gb)
                         print("Total Storage: " + free_storage_gb)
+
                         updated_values = {
                             "OperatingSystem": device_data.get("operatingSystem", ""),
                             "OSVersion": device_data.get("osVersion", ""),
@@ -1122,7 +1131,7 @@ class DeviceInventoryApp:
                             'MAC': device_data.get('wiFiMacAddress', ""),                        
                             'ReportTime': time.strftime("%Y-%m-%dT%H:%M:%SZ"),
                             'Source': "Cloud",
-                            'Encryption': device_data.get('Encryption', ""),                        
+                            'Encryption': encryption,                        
                             'TotalStorage': total_storage_gb,
                             'FreeStorage': free_storage_gb
                         }
@@ -1978,6 +1987,8 @@ class DeviceInventoryApp:
             # Bind right-click menu for copying cell value and adding remark
             self.tree.bind("<Button-3>", self.show_context_menu)
 
+            self.tree.bind("<ButtonRelease-1>", self.on_column_resize)
+
             # Context menu for right-click
             self.context_menu = tk.Menu(self.tree, tearoff=0)
             self.context_menu.add_command(label="Copy", command=self.copy_cell_value)
@@ -2018,6 +2029,14 @@ class DeviceInventoryApp:
 
             # Update the display
             self.root.update()
+
+    def on_column_resize(self, event):
+        column_id = self.tree.identify_column(event.x).replace("#", "")
+        if column_id.isdigit():
+            column_index = int(column_id) - 1
+            column_name = self.tree["columns"][column_index]
+            current_width = self.tree.column(column_name, option="width")
+            self.column_widths[column_name] = current_width
 
     def export_view(self):
         file_path = filedialog.asksaveasfilename(
@@ -2097,47 +2116,28 @@ class DeviceInventoryApp:
         self.root.minsize(width=400, height=600)  # Set a minimum width and height
 
     def update_treeview_columns(self, is_new_column=False):
-        # Define the new column width equivalent to 10 characters
-        default_char_width = 10  # Estimated width of a single character in pixels
-        new_column_width = default_char_width * 10
-
-        # If columns are being added, update the UI width
+        # Ensure new column widths are added dynamically if a new column is introduced
         if is_new_column:
-            if hasattr(self, "initial_total_width"):
-                self.initial_total_width += new_column_width
-            else:
-                self.initial_total_width = max(self.root.winfo_width(), self.min_window_width)
+            for col in self.selected_columns:
+                if col not in self.column_widths:
+                    self.column_widths[col] = max(100, len(col) * 10)  # Default width for new columns
 
-            # Ensure the total width does not exceed the maximum allowed width (1310 pixels)
-            self.total_width = min(self.initial_total_width, 1310)
-            self.root.minsize(width=self.total_width, height=600)
-
-        current_columns = list(self.tree["columns"])
-        current_column_widths = {col: self.tree.column(col, option="width") for col in current_columns}
-
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-
-        self.tree["column"] = self.selected_columns
+        # Update TreeView columns and display settings
+        self.tree["columns"] = self.selected_columns
         self.tree["show"] = "headings"
 
-        # Synchronize the menu checkboxes with the selected columns
-        for col, var in self.column_vars.items():
-            var.set(col in self.selected_columns)
-
-        # Configure TreeView headings and column properties
+        # Configure columns
         for col in self.selected_columns:
             self.tree.heading(col, text=col, command=lambda _col=col: self.sort_data(_col))
-            header_width = max(100, len(col) * 10)  # Ensure a default minimum width for headers
-            self.tree.column(col, width=header_width, minwidth=header_width, stretch=True, anchor="center")
+            width = self.column_widths.get(col, 100)
+            self.tree.column(col, width=width, minwidth=width, stretch=True, anchor="center")
 
-        # Insert the data into the TreeView
-        for _, row in self.filtered_data.iterrows():
-            row_values = [row[col] for col in self.selected_columns]
-            self.tree.insert("", "end", values=row_values)
+        # Adjust data display
+        self.display_data(self.filtered_data)
 
-        # Adjust window width to match the selected columns
-        self.adjust_window_width()
+        # Synchronize column visibility menu
+        for col, var in self.column_vars.items():
+            var.set(col in self.selected_columns)
 
         # Update filter comboboxes with the new list of columns
         self.update_filter_columns()
@@ -2398,8 +2398,7 @@ class DeviceInventoryApp:
 
     def display_data(self, data):
         # Clear the existing treeview
-        for item in self.tree.get_children():
-            self.tree.delete(item)
+        self.tree.delete(*self.tree.get_children())
 
         # Set up new treeview columns based on selected columns
         columns_present = [col for col in self.selected_columns if col in data.columns]
@@ -2407,9 +2406,11 @@ class DeviceInventoryApp:
         self.tree["show"] = "headings"
 
         for col in columns_present:
+            # Use the stored user width if available
+            user_width = self.column_widths.get(col, None)
+            header_width = user_width if user_width is not None else max(100, len(col) * 10)  # Default minimum width
             self.tree.heading(col, text=col, command=lambda _col=col: self.sort_data(_col))
-            header_width = max(100, len(col) * 10)  # Ensure a default minimum width for headers
-            self.tree.column(col, width=header_width, minwidth=header_width, stretch=True, anchor='center')
+            self.tree.column(col, width=header_width, minwidth=100, stretch=True, anchor='center')
 
         # Get only rows for the current page
         start_index = self.current_page * self.page_size
@@ -2418,7 +2419,8 @@ class DeviceInventoryApp:
 
         # Insert data into treeview
         for _, row in current_page_data.iterrows():
-            row_values = row.copy()
+            row_values = row.to_dict()
+            display_values = [str(row_values.get(col, "")) for col in columns_present]
 
             # For 'Local' records, convert Encryption value from 1/0 to True/False
             if row_values['Source'] == 'Local' and 'Encryption' in row_values:
@@ -2427,7 +2429,7 @@ class DeviceInventoryApp:
                 elif row_values['Encryption'] == '0':
                     row_values['Encryption'] = False
 
-            self.tree.insert("", "end", values=[str(row_values[col]) for col in columns_present])
+            self.tree.insert("", "end", values=display_values)
 
         # Adjust window width based on current columns
         self.adjust_window_width()
